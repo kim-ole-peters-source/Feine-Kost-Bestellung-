@@ -1,0 +1,23 @@
+{
+  "system": "Gebrueder Pesch Feinkost - Internes Bestellsystem",
+  "architektur": "Python-Server nach Opa-Peters-Struktur mit statischem Frontend und SQLite-Speicher",
+  "start": {
+    "lokal": "python3 app.py",
+    "url": "http://127.0.0.1:8000"
+  },
+  "datenbank": {
+    "typ": "SQLite",
+    "datei": "bestellsystem.db",
+    "speicher": "kv_store fuer orders, artikeldaten, customItems, deletedItems, haendlerListe und notifyEmails"
+  },
+  "frontend": {
+    "html": "static/index.html",
+    "css": "static/style.css",
+    "javascript": "static/app.js"
+  },
+  "api": {
+    "storage_get": "GET /api/storage/<key>",
+    "storage_set": "PUT /api/storage/<key>"
+  },
+  "hinweis": "Die fachlichen Funktionen wurden beibehalten. Firebase wurde durch serverseitige Speicherung in SQLite ersetzt. EmailJS und PDF-Erzeugung laufen weiterhin im Browser."
+}

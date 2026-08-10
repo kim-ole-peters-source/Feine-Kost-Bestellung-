@@ -1,0 +1,2 @@
+# Keine externen Python-Pakete noetig.
+# Frontend-Bibliotheken werden wie bisher im Browser per CDN geladen.
