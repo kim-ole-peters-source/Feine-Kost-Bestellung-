@@ -81,6 +81,26 @@ Empfohlen:
 - HTTPS aktivieren
 - optional zusätzlichen Passwortschutz am Server setzen
 
+## Artikel mehrfach anlegen
+
+Nach dem Einloggen als Geschäftsführung:
+
+1. `Artikelstammdaten` öffnen.
+2. Für manuelle Mehrfachanlage `+ Mehrere Artikel` klicken.
+3. Für CSV-Import zuerst `Muster-CSV` herunterladen und ausfüllen.
+4. Danach `CSV importieren` klicken und die ausgefüllte Datei auswählen.
+
+CSV-Spalten:
+
+```text
+artikelname;kategorie;bereich;einheit;ve;haendler;rhythmus
+```
+
+Erlaubte Werte:
+
+- `bereich`: `Laden` oder `Produktion`
+- `rhythmus`: `beide`, `freitag` oder `monat`
+
 ## Vercel optional
 
 Die Struktur enthält wie beim Opa-Peters-System:

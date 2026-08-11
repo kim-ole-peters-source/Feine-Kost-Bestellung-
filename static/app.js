@@ -502,6 +502,10 @@ let state = {
   codeError: false,
   newItemPopupOpen: false,
   newItem: { name:"", kategorie:"", bereich:"Laden", unit:"Einheiten", ve:"", haendler:"", rhythmus:"beide" },
+  bulkItemPopupOpen: false,
+  bulkItemRows: [],
+  bulkItemStatus: null,
+  stammNotice: null,
   stammSearch: "",
   stammOpenCats: new Set(),
 };
@@ -622,6 +626,23 @@ function isValidEmail(v){
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v.trim());
 }
 
+function escapeHtml(value){
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function createCustomItemId(){
+  let id;
+  do{
+    id = 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+  }while(findItem(id) || state.deletedItems.includes(id));
+  return id;
+}
+
 async function addNotifyEmail(){
   const val = state.newEmailInput.trim();
   if(!val || !isValidEmail(val)) return;
@@ -682,12 +703,12 @@ function renderHaendlerField(prefix, currentValue){
   return `
     <select class="field" id="${prefix}-haendler-select">
       <option value="">— keiner —</option>
-      ${liste.map(h=>`<option value="${h.replace(/"/g,'&quot;')}" ${currentValue===h?'selected':''}>${h}</option>`).join('')}
+      ${liste.map(h=>`<option value="${escapeHtml(h)}" ${currentValue===h?'selected':''}>${escapeHtml(h)}</option>`).join('')}
       <option value="__neu__" ${isNeu?'selected':''}>+ Neuer Händler…</option>
     </select>
     <input class="field" id="${prefix}-haendler-neu" type="text" placeholder="Name des neuen Händlers"
       style="margin-top:6px;${isNeu?'':'display:none;'}"
-      value="${isNeu ? currentValue.replace(/"/g,'&quot;') : ''}" />
+      value="${isNeu ? escapeHtml(currentValue) : ''}" />
   `;
 }
 
@@ -1450,7 +1471,7 @@ function refreshNewItemSaveState(){
 async function saveNewItem(){
   const ni = state.newItem;
   if(!ni.name.trim() || !ni.kategorie || !ni.bereich) return;
-  const id = 'c' + Date.now().toString(36);
+  const id = createCustomItemId();
   const haendler = readHaendlerField('ni');
   const rhythmus = document.getElementById('ni-rhythmus')?.value || 'beide';
   state.customItems.push({
@@ -1462,6 +1483,290 @@ async function saveNewItem(){
   await saveArtikeldaten();
   state.newItemPopupOpen = false;
   render();
+}
+
+function getBlankBulkItemRow(){
+  return { name:"", kategorie:"", bereich:"Laden", unit:"Einheiten", ve:"", haendler:"", rhythmus:"beide" };
+}
+
+function openBulkItemPopup(){
+  state.bulkItemRows = [getBlankBulkItemRow(), getBlankBulkItemRow(), getBlankBulkItemRow()];
+  state.bulkItemStatus = null;
+  state.bulkItemPopupOpen = true;
+  render();
+}
+
+function closeBulkItemPopup(){
+  state.bulkItemPopupOpen = false;
+  state.bulkItemRows = [];
+  state.bulkItemStatus = null;
+  render();
+}
+
+function readBulkItemRowsFromDom(){
+  return Array.from(document.querySelectorAll('.bulk-item-row')).map(row => {
+    const i = row.dataset.bulkIndex;
+    return {
+      name: document.getElementById(`bulk-${i}-name`)?.value.trim() || '',
+      kategorie: document.getElementById(`bulk-${i}-kategorie`)?.value || '',
+      bereich: document.getElementById(`bulk-${i}-bereich`)?.value || 'Laden',
+      unit: document.getElementById(`bulk-${i}-unit`)?.value.trim() || '',
+      ve: document.getElementById(`bulk-${i}-ve`)?.value.trim() || '',
+      haendler: readHaendlerField(`bulk-${i}`),
+      rhythmus: document.getElementById(`bulk-${i}-rhythmus`)?.value || 'beide',
+    };
+  });
+}
+
+function addBulkItemRow(){
+  state.bulkItemRows = readBulkItemRowsFromDom();
+  state.bulkItemRows.push(getBlankBulkItemRow());
+  state.bulkItemStatus = null;
+  render();
+}
+
+function removeBulkItemRow(index){
+  state.bulkItemRows = readBulkItemRowsFromDom();
+  state.bulkItemRows.splice(index, 1);
+  if(state.bulkItemRows.length === 0) state.bulkItemRows.push(getBlankBulkItemRow());
+  state.bulkItemStatus = null;
+  render();
+}
+
+function normalizeBereich(value){
+  const v = String(value || '').trim().toLowerCase();
+  if(!v) return 'Laden';
+  if(v.startsWith('prod')) return 'Produktion';
+  if(v.startsWith('lad')) return 'Laden';
+  return null;
+}
+
+function normalizeRhythmus(value){
+  const v = String(value || '').trim().toLowerCase();
+  if(!v || v === 'beide' || v === 'beides' || v.includes('freitags') && v.includes('monat')) return 'beide';
+  if(v.startsWith('frei') || v === 'woche' || v === 'woechentlich' || v === 'wöchentlich') return 'freitag';
+  if(v.startsWith('monat') || v === 'monatlich') return 'monat';
+  return null;
+}
+
+function prepareBulkItems(rows, sourceLabel){
+  const items = [];
+  const errors = [];
+  rows.forEach((row, index) => {
+    const line = sourceLabel === 'CSV' ? `CSV-Zeile ${index + 1}` : `Zeile ${index + 1}`;
+    const hasAnyValue = Object.values(row).some(v => String(v || '').trim());
+    if(!hasAnyValue) return;
+
+    const bereich = normalizeBereich(row.bereich);
+    const rhythmus = normalizeRhythmus(row.rhythmus);
+    const name = String(row.name || '').trim();
+    const kategorie = String(row.kategorie || '').trim();
+
+    if(!name) errors.push(`${line}: Artikelname fehlt.`);
+    if(!kategorie) errors.push(`${line}: Kategorie fehlt.`);
+    if(!bereich) errors.push(`${line}: Bereich muss Laden oder Produktion sein.`);
+    if(!rhythmus) errors.push(`${line}: Rhythmus muss beide, freitag oder monat sein.`);
+    if(!name || !kategorie || !bereich || !rhythmus) return;
+
+    items.push({
+      name,
+      kategorie,
+      bereich,
+      unit: String(row.unit || '').trim() || 'Einheiten',
+      ve: String(row.ve || '').trim(),
+      haendler: String(row.haendler || '').trim(),
+      rhythmus,
+    });
+  });
+  return { items, errors };
+}
+
+async function addCustomItemsBulk(items){
+  items.forEach(item => {
+    const id = createCustomItemId();
+    state.customItems.push({
+      id,
+      name: item.name,
+      kategorie: item.kategorie,
+      bereich: item.bereich,
+      unit: item.unit || 'Einheiten',
+    });
+    state.artikeldaten[id] = {
+      ve: item.ve || '',
+      haendler: item.haendler || '',
+      rhythmus: item.rhythmus || 'beide',
+    };
+  });
+  await saveCustomItems();
+  await saveArtikeldaten();
+}
+
+async function saveBulkItems(){
+  const rows = readBulkItemRowsFromDom();
+  const { items, errors } = prepareBulkItems(rows, 'Formular');
+  if(errors.length > 0){
+    state.bulkItemRows = rows;
+    state.bulkItemStatus = { type:'error', text: errors.slice(0, 5).join(' ') + (errors.length > 5 ? ` Weitere ${errors.length - 5} Fehler.` : '') };
+    render();
+    return;
+  }
+  if(items.length === 0){
+    state.bulkItemRows = rows;
+    state.bulkItemStatus = { type:'error', text:'Bitte mindestens einen Artikel eintragen.' };
+    render();
+    return;
+  }
+  await addCustomItemsBulk(items);
+  state.bulkItemPopupOpen = false;
+  state.bulkItemRows = [];
+  state.bulkItemStatus = null;
+  state.stammNotice = { type:'success', text:`${items.length} Artikel wurden angelegt.` };
+  render();
+}
+
+function countCsvDelimiter(line, delimiter){
+  let count = 0;
+  let inQuotes = false;
+  for(let i=0; i<line.length; i++){
+    const ch = line[i];
+    if(ch === '"'){
+      if(inQuotes && line[i+1] === '"') i++;
+      else inQuotes = !inQuotes;
+    } else if(ch === delimiter && !inQuotes){
+      count++;
+    }
+  }
+  return count;
+}
+
+function detectCsvDelimiter(text){
+  const firstLine = String(text || '').split(/\r?\n/).find(line => line.trim()) || '';
+  return [';', '\t', ','].sort((a,b) => countCsvDelimiter(firstLine, b) - countCsvDelimiter(firstLine, a))[0];
+}
+
+function parseCsvRows(text){
+  const delimiter = detectCsvDelimiter(text);
+  const rows = [];
+  let row = [];
+  let cell = '';
+  let inQuotes = false;
+  const source = String(text || '').replace(/^\uFEFF/, '');
+  for(let i=0; i<source.length; i++){
+    const ch = source[i];
+    if(ch === '"'){
+      if(inQuotes && source[i+1] === '"'){
+        cell += '"';
+        i++;
+      } else {
+        inQuotes = !inQuotes;
+      }
+    } else if(ch === delimiter && !inQuotes){
+      row.push(cell);
+      cell = '';
+    } else if((ch === '\n' || ch === '\r') && !inQuotes){
+      if(ch === '\r' && source[i+1] === '\n') i++;
+      row.push(cell);
+      if(row.some(v => String(v || '').trim())) rows.push(row);
+      row = [];
+      cell = '';
+    } else {
+      cell += ch;
+    }
+  }
+  row.push(cell);
+  if(row.some(v => String(v || '').trim())) rows.push(row);
+  return rows;
+}
+
+function canonicalCsvHeader(value){
+  const v = String(value || '').trim().toLowerCase()
+    .replace(/ä/g, 'ae').replace(/ö/g, 'oe').replace(/ü/g, 'ue').replace(/ß/g, 'ss')
+    .replace(/[^a-z0-9]/g, '');
+  const map = {
+    artikelname: 'name',
+    artikel: 'name',
+    produkt: 'name',
+    produktname: 'name',
+    name: 'name',
+    kategorie: 'kategorie',
+    category: 'kategorie',
+    bereich: 'bereich',
+    einheit: 'unit',
+    unit: 'unit',
+    ve: 've',
+    verpackungseinheit: 've',
+    haendler: 'haendler',
+    handler: 'haendler',
+    lieferant: 'haendler',
+    bestellrhythmus: 'rhythmus',
+    rhythmus: 'rhythmus',
+  };
+  return map[v] || null;
+}
+
+function parseBulkItemsCsv(text){
+  const rows = parseCsvRows(text);
+  if(rows.length === 0) return { items: [], errors: ['Die CSV-Datei ist leer.'] };
+  const standardFields = ['name','kategorie','bereich','unit','ve','haendler','rhythmus'];
+  const first = rows[0].map(canonicalCsvHeader);
+  const hasHeader = first.includes('name') && first.includes('kategorie');
+  const fields = hasHeader ? first : standardFields;
+  const dataRows = hasHeader ? rows.slice(1) : rows;
+  const drafts = dataRows.map(row => {
+    const draft = {};
+    fields.forEach((field, index) => {
+      if(field) draft[field] = row[index] || '';
+    });
+    return draft;
+  });
+  return prepareBulkItems(drafts, 'CSV');
+}
+
+async function handleBulkCsvFile(file){
+  if(!file) return;
+  const reader = new FileReader();
+  reader.onload = async (e) => {
+    const { items, errors } = parseBulkItemsCsv(e.target.result || '');
+    if(errors.length > 0){
+      state.stammNotice = { type:'error', text: errors.slice(0, 5).join(' ') + (errors.length > 5 ? ` Weitere ${errors.length - 5} Fehler.` : '') };
+      render();
+      return;
+    }
+    if(items.length === 0){
+      state.stammNotice = { type:'error', text:'In der CSV-Datei wurden keine Artikel gefunden.' };
+      render();
+      return;
+    }
+    await addCustomItemsBulk(items);
+    state.stammNotice = { type:'success', text:`${items.length} Artikel aus CSV importiert.` };
+    render();
+  };
+  reader.onerror = () => {
+    state.stammNotice = { type:'error', text:'Die CSV-Datei konnte nicht gelesen werden.' };
+    render();
+  };
+  reader.readAsText(file, 'utf-8');
+}
+
+function downloadBulkCsvTemplate(){
+  const lines = [
+    ['artikelname','kategorie','bereich','einheit','ve','haendler','rhythmus'],
+    ['Muster Olivenoel 250ml','Öle','Laden','Einheiten','6','Viani','monat'],
+    ['Muster Glas 212ml','Gläser, Flaschen und Dosen','Produktion','Einheiten','12','Produktion','freitag'],
+  ];
+  const csv = '\uFEFF' + lines.map(row => row.map(value => {
+    const text = String(value || '');
+    return /[;"\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+  }).join(';')).join('\n');
+  const blob = new Blob([csv], { type:'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'muster_artikel_mehrfachanlage.csv';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 function openNewHaendlerPopup(){
@@ -2043,6 +2348,7 @@ function renderEmpfangSeite(){
       ${renderArtikelstammdaten()}
       ${state.editingItem ? renderEditPopup() : ''}
       ${state.newItemPopupOpen ? renderNewItemPopup() : ''}
+      ${state.bulkItemPopupOpen ? renderBulkItemsPopup() : ''}
     `;
   }
 
@@ -2098,8 +2404,15 @@ function renderArtikelstammdaten(){
   return `
     <div class="stamm-toolbar">
       <input class="search-box" id="stamm-search-input" type="text" placeholder="Artikel suchen…" value="${state.stammSearch.replace(/"/g,'&quot;')}" />
-      <button class="new-item-btn" data-action="newitem">+ Neuer Artikel</button>
+      <div class="stamm-actions">
+        <button class="new-item-btn" data-action="newitem">+ Neuer Artikel</button>
+        <button class="new-item-btn" data-action="openbulkitems">+ Mehrere Artikel</button>
+        <button class="edit-btn" data-action="downloadbulkcsvtemplate">Muster-CSV</button>
+        <button class="edit-btn" data-action="importbulkcsv">CSV importieren</button>
+        <input type="file" id="bulk-csv-input" accept=".csv,text/csv" style="display:none;" />
+      </div>
     </div>
+    ${state.stammNotice ? `<div class="notice notice-${state.stammNotice.type}">${escapeHtml(state.stammNotice.text)}</div>` : ''}
     ${noResults ? `<p class="no-results">Keine Artikel gefunden.</p>` : html}
   `;
 }
@@ -2391,6 +2704,64 @@ function renderNewItemPopup(){
   `;
 }
 
+function renderBulkItemsPopup(){
+  const kategorien = getAllKategorien();
+  const rows = state.bulkItemRows.length ? state.bulkItemRows : [getBlankBulkItemRow()];
+  const kategorieOptions = (selected) => `
+    <option value="">Kategorie wählen…</option>
+    ${kategorien.map(k => `<option value="${escapeHtml(k)}" ${selected===k?'selected':''}>${escapeHtml(k)}</option>`).join('')}
+  `;
+
+  return `
+    <div class="popup-overlay" data-action="closebulkitems">
+      <div class="popup-box popup-box-wide" onclick="event.stopPropagation()">
+        <h3>Mehrere Artikel anlegen</h3>
+        <p class="code-sub">Leere Zeilen werden ignoriert. Pflichtfelder sind Artikelname und Kategorie.</p>
+        ${state.bulkItemStatus ? `<div class="notice notice-${state.bulkItemStatus.type}">${escapeHtml(state.bulkItemStatus.text)}</div>` : ''}
+        <div class="bulk-item-table">
+          <div class="bulk-item-table-head">
+            <span>Artikelname *</span>
+            <span>Kategorie *</span>
+            <span>Bereich</span>
+            <span>Einheit</span>
+            <span>VE</span>
+            <span>Händler</span>
+            <span>Rhythmus</span>
+            <span></span>
+          </div>
+          ${rows.map((row, i) => `
+            <div class="bulk-item-row" data-bulk-index="${i}">
+              <input class="field" id="bulk-${i}-name" type="text" placeholder="Artikelname" value="${escapeHtml(row.name)}" />
+              <select class="field" id="bulk-${i}-kategorie">${kategorieOptions(row.kategorie)}</select>
+              <select class="field" id="bulk-${i}-bereich">
+                <option value="Laden" ${row.bereich==='Laden'?'selected':''}>Laden</option>
+                <option value="Produktion" ${row.bereich==='Produktion'?'selected':''}>Produktion</option>
+              </select>
+              <input class="field" id="bulk-${i}-unit" type="text" placeholder="Einheiten" value="${escapeHtml(row.unit || 'Einheiten')}" />
+              <input class="field" id="bulk-${i}-ve" type="text" placeholder="z. B. 6" value="${escapeHtml(row.ve)}" />
+              <div>${renderHaendlerField(`bulk-${i}`, row.haendler || '')}</div>
+              <select class="field" id="bulk-${i}-rhythmus">
+                <option value="beide" ${(!row.rhythmus || row.rhythmus==='beide')?'selected':''}>Beide</option>
+                <option value="freitag" ${row.rhythmus==='freitag'?'selected':''}>Freitag</option>
+                <option value="monat" ${row.rhythmus==='monat'?'selected':''}>Monat</option>
+              </select>
+              <button class="cart-remove-btn bulk-remove-btn" data-action="removebulkitemrow" data-index="${i}" aria-label="Zeile entfernen">✕</button>
+            </div>
+          `).join('')}
+        </div>
+        <div class="bulk-help">
+          CSV-Spalten: <strong>artikelname; kategorie; bereich; einheit; ve; haendler; rhythmus</strong>
+        </div>
+        <div class="popup-actions popup-actions-wrap">
+          <button class="popup-cancel" data-action="closebulkitems">Abbrechen</button>
+          <button class="edit-btn" data-action="addbulkitemrow">+ Zeile</button>
+          <button class="submit-btn" data-action="savebulkitems">Alle anlegen</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
 function render(){
   const app = document.getElementById('app');
 
@@ -2525,6 +2896,32 @@ function attachHandlers(){
   });
   document.querySelectorAll('[data-action="newitem"]').forEach(el=>{
     el.addEventListener('click', openNewItemPopup);
+  });
+  document.querySelectorAll('[data-action="openbulkitems"]').forEach(el=>{
+    el.addEventListener('click', openBulkItemPopup);
+  });
+  document.querySelectorAll('[data-action="closebulkitems"]').forEach(el=>{
+    el.addEventListener('click', closeBulkItemPopup);
+  });
+  document.querySelectorAll('[data-action="addbulkitemrow"]').forEach(el=>{
+    el.addEventListener('click', addBulkItemRow);
+  });
+  document.querySelectorAll('[data-action="removebulkitemrow"]').forEach(el=>{
+    el.addEventListener('click', ()=>removeBulkItemRow(parseInt(el.dataset.index, 10)));
+  });
+  document.querySelectorAll('[data-action="savebulkitems"]').forEach(el=>{
+    el.addEventListener('click', saveBulkItems);
+  });
+  document.querySelectorAll('[data-action="downloadbulkcsvtemplate"]').forEach(el=>{
+    el.addEventListener('click', downloadBulkCsvTemplate);
+  });
+  document.querySelectorAll('[data-action="importbulkcsv"]').forEach(el=>{
+    el.addEventListener('click', ()=>document.getElementById('bulk-csv-input')?.click());
+  });
+  const bulkCsvInput = document.getElementById('bulk-csv-input');
+  if(bulkCsvInput) bulkCsvInput.addEventListener('change', e=>{
+    handleBulkCsvFile(e.target.files[0]);
+    e.target.value = '';
   });
   document.querySelectorAll('[data-action="closenewitem"]').forEach(el=>{
     el.addEventListener('click', closeNewItemPopup);

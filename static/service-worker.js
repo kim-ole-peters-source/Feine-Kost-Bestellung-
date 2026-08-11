@@ -1,4 +1,4 @@
-const CACHE_NAME = 'gebrueder-pesch-bestellung-v1';
+const CACHE_NAME = 'gebrueder-pesch-bestellung-v3-bulk-products';
 const STATIC_ASSETS = [
   '/',
   '/static/index.html',

@@ -28,6 +28,8 @@ serverfähige Projektstruktur überführt. Die Bestellfunktionen bleiben gleich:
 - PDF-Export im Browser
 - Status, Bearbeiten, Löschen und Chat je Bestellung
 - Artikelstammdaten, Händler und E-Mail-Empfänger
+- Mehrfachanlage von Artikeln im Geschäftsführungs-Backend
+- CSV-Import für Artikel inklusive herunterladbarer Muster-CSV
 
 Der wichtigste technische Unterschied:
 
@@ -51,6 +53,24 @@ Optional mit anderem Port:
 ```bash
 PORT=8080 python3 app.py
 ```
+
+## Mehrere Artikel anlegen
+
+Im Geschäftsführungs-Backend unter `Artikelstammdaten` gibt es drei neue
+Möglichkeiten:
+
+- `+ Mehrere Artikel` - mehrere Artikel direkt in einer Tabelle eintragen
+- `Muster-CSV` - Beispielvorlage herunterladen
+- `CSV importieren` - mehrere Artikel aus einer CSV-Datei übernehmen
+
+Die CSV kann mit Semikolon oder Komma getrennt sein. Unterstützte Spalten:
+
+```text
+artikelname;kategorie;bereich;einheit;ve;haendler;rhythmus
+```
+
+`bereich` kann `Laden` oder `Produktion` sein. `rhythmus` kann `beide`,
+`freitag` oder `monat` sein.
 
 ## GitHub hochladen
 

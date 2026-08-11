@@ -32,7 +32,7 @@ PORT = int(os.environ.get("PORT", "8000"))
 APP_NAME = "Gebrueder Pesch Bestellsystem"
 APP_SHORT_NAME = "Pesch Bestellung"
 THEME_COLOR = "#233a52"
-ASSET_VERSION = "2026-08-10-opa-style"
+ASSET_VERSION = "2026-08-11-bulk-products-2"
 MAX_JSON_BYTES = int(os.environ.get("MAX_JSON_BYTES", str(60 * 1024 * 1024)))
 
 ALLOWED_STORAGE_KEYS = {
