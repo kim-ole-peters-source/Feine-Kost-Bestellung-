@@ -1,4 +1,4 @@
-const CACHE_NAME = 'gebrueder-pesch-bestellung-v5-invoices-ai';
+const CACHE_NAME = 'gebrueder-pesch-bestellung-v6-invoices-edit';
 const STATIC_ASSETS = [
   '/',
   '/static/index.html',

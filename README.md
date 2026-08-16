@@ -10,7 +10,7 @@ Server- und GitHub-Struktur nach dem Vorbild des Opa-Peters-Bestellsystems.
 - `static/style.css` - ausgelagertes Design
 - `static/app.js` - ausgelagerte Programmlogik
 - `static/icons/` - Logo und App-Icons
-- `bestellsystem.db` - SQLite-Datenbank, wird beim ersten Start automatisch erstellt
+- `bestellsystem.db` - SQLite-Datenbank
 - `uploads/`, `order_images/`, `orders/`, `time_exports/` - Serverordner wie beim Referenzsystem
 - `requirements.txt`, `pyproject.toml`, `vercel.json` - Deployment-Dateien
 
@@ -106,13 +106,10 @@ müssen auf oberster Ebene liegen, also zum Beispiel:
 - `static/app.js`
 - `static/style.css`
 - `static/index.html`
+- `bestellsystem.db`
 - `requirements.txt`
 - `pyproject.toml`
 - `vercel.json`
-
-Hinweis: Die Datei `bestellsystem.db` ist in diesem GitHub-Paket absichtlich
-nicht enthalten. Sie wird automatisch erzeugt. So werden keine echten
-Bestellungen oder Rechnungen versehentlich bei GitHub hochgeladen.
 
 ## Serverbetrieb
 

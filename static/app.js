@@ -515,6 +515,7 @@ let state = {
   invoiceStatusFilter: "offen",
   invoiceSearch: "",
   invoiceDraft: null,
+  editingInvoiceId: null,
   invoiceAiLoading: false,
   pendingInvoiceProduct: null,
 };
@@ -809,6 +810,33 @@ function defaultInvoiceDraft(){
   };
 }
 
+function invoiceItemsToText(items){
+  return (items || []).map(item => [
+    item.name || '',
+    item.qty || 1,
+    item.unit || 'Einheiten',
+    item.net ? formatMoneyInputFromNumber(item.net) : '',
+    item.taxRate || '',
+  ].join('; ')).join('\n');
+}
+
+function invoiceToDraft(invoice){
+  if(!invoice) return defaultInvoiceDraft();
+  return {
+    supplier: invoice.supplier || '',
+    invoiceNumber: invoice.invoiceNumber || '',
+    invoiceDate: invoice.invoiceDate || todayInputValue(),
+    dueDate: invoice.dueDate || '',
+    net: formatMoneyInputFromNumber(invoice.net),
+    tax: formatMoneyInputFromNumber(invoice.tax),
+    gross: formatMoneyInputFromNumber(invoice.gross),
+    taxRate: invoice.taxRate ? String(invoice.taxRate).replace('.', ',') : '19',
+    status: invoice.status || 'offen',
+    note: invoice.note || '',
+    itemsText: invoiceItemsToText(invoice.items),
+  };
+}
+
 function normalizeProductName(value){
   return String(value || '')
     .toLowerCase()
@@ -939,6 +967,18 @@ function readInvoiceDraftFromDom(){
 function openInvoiceUpload(){
   state.invoiceDraft = defaultInvoiceDraft();
   state.invoicePendingFiles = [];
+  state.editingInvoiceId = null;
+  state.invoiceUploadOpen = true;
+  state.invoiceNotice = null;
+  render();
+}
+
+function openInvoiceEdit(invoiceId){
+  const invoice = state.invoices.find(inv => inv.id === invoiceId);
+  if(!invoice) return;
+  state.invoiceDraft = invoiceToDraft(invoice);
+  state.invoicePendingFiles = [...(invoice.files || [])];
+  state.editingInvoiceId = invoiceId;
   state.invoiceUploadOpen = true;
   state.invoiceNotice = null;
   render();
@@ -948,6 +988,7 @@ function closeInvoiceUpload(){
   state.invoiceUploadOpen = false;
   state.invoicePendingFiles = [];
   state.invoiceDraft = null;
+  state.editingInvoiceId = null;
   render();
 }
 
@@ -1071,8 +1112,14 @@ async function saveInvoiceFromDraft(){
     render();
     return;
   }
-  const invoice = {
+  const existing = state.editingInvoiceId
+    ? state.invoices.find(inv => inv.id === state.editingInvoiceId)
+    : null;
+  const invoice = existing || {
     id: 'inv' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+    createdAt: new Date().toISOString(),
+  };
+  Object.assign(invoice, {
     supplier: draft.supplier || 'Ohne Lieferant',
     invoiceNumber: draft.invoiceNumber,
     invoiceDate: draft.invoiceDate || todayInputValue(),
@@ -1085,9 +1132,11 @@ async function saveInvoiceFromDraft(){
     note: draft.note,
     files: [...state.invoicePendingFiles],
     items,
-    createdAt: new Date().toISOString(),
-  };
-  state.invoices.unshift(invoice);
+    updatedAt: new Date().toISOString(),
+  });
+  if(!existing){
+    state.invoices.unshift(invoice);
+  }
   if(invoice.supplier && !state.haendlerListe.includes(invoice.supplier)){
     state.haendlerListe.push(invoice.supplier);
     await saveHaendlerListe();
@@ -1096,7 +1145,11 @@ async function saveInvoiceFromDraft(){
   state.invoiceUploadOpen = false;
   state.invoicePendingFiles = [];
   state.invoiceDraft = null;
-  state.invoiceNotice = { type:'success', text:'Rechnung wurde gespeichert und mit den Artikelstammdaten abgeglichen.' };
+  state.editingInvoiceId = null;
+  state.invoiceNotice = {
+    type:'success',
+    text: existing ? 'Rechnung wurde aktualisiert.' : 'Rechnung wurde gespeichert und mit den Artikelstammdaten abgeglichen.',
+  };
   render();
 }
 
@@ -1801,6 +1854,7 @@ function setGfTab(t){
   state.gfTab = t;
   state.editingItem = null;
   state.invoiceUploadOpen = false;
+  state.editingInvoiceId = null;
   state.pendingInvoiceProduct = null;
   state.sammlungOffset = 0;
   render();
@@ -2891,7 +2945,30 @@ function renderInvoicesControlling(){
       const date = inv.invoiceDate ? new Date(inv.invoiceDate).toLocaleDateString('de-DE') : 'ohne Datum';
       const due = inv.dueDate ? ` · fällig ${new Date(inv.dueDate).toLocaleDateString('de-DE')}` : '';
       const files = inv.files || [];
+      const items = inv.items || [];
       const reviewCount = (inv.items || []).filter(line => getInvoiceReviewForLine(line).state === 'review').length;
+      const itemRows = items.length === 0
+        ? `<p class="no-results invoice-no-items">Keine Produktpositionen erfasst.</p>`
+        : items.map((item, index) => {
+          const review = getInvoiceReviewForLine(item);
+          const matched = item.matchId ? findItem(item.matchId) : null;
+          const reviewLabel = matched
+            ? `Verknüpft mit: ${matched.name}`
+            : (review.state === 'known' ? 'Bekanntes Produkt' : review.state === 'review' ? 'Prüfen' : review.state === 'ignored' ? 'Später prüfen' : '');
+          return `
+            <div class="invoice-position-row">
+              <div>
+                <strong>${escapeHtml(item.name || 'Ohne Produktname')}</strong>
+                <span>${escapeHtml(reviewLabel)}</span>
+              </div>
+              <div class="invoice-position-meta">
+                <span>${item.qty || 1} × ${escapeHtml(item.unit || 'Einheiten')}</span>
+                ${item.net ? `<span>${formatEuro(item.net)} netto</span>` : ''}
+                ${item.taxRate ? `<span>${escapeHtml(item.taxRate)} %</span>` : ''}
+              </div>
+            </div>
+          `;
+        }).join('');
       return `
         <div class="sammel-card invoice-card">
           <div class="sammel-card-head">
@@ -2915,11 +2992,20 @@ function renderInvoicesControlling(){
               `).join('')}
             </div>
           ` : ''}
+          <div class="invoice-position-list">
+            <div class="invoice-position-head">
+              <span>Erfasste Produktpositionen</span>
+              <span>${items.length}</span>
+            </div>
+            ${itemRows}
+          </div>
           ${inv.note ? `<p class="order-note">${escapeHtml(inv.note)}</p>` : ''}
           <div class="order-actions">
+            <button class="btn-pdf" data-action="editinvoice" data-id="${inv.id}">Ansehen / bearbeiten</button>
             <button class="btn-reopen" data-action="invoicepruefung" data-id="${inv.id}">In Prüfung</button>
             <button class="btn-reopen" data-action="invoiceopen" data-id="${inv.id}">Offen</button>
             <button class="btn-complete" data-action="invoicepaid" data-id="${inv.id}">Bezahlt</button>
+            <button class="popup-cancel invoice-small-btn" data-action="invoicearchived" data-id="${inv.id}">Archivieren</button>
             <button class="danger-outline" data-action="deleteinvoice" data-id="${inv.id}">Löschen</button>
           </div>
         </div>
@@ -2980,10 +3066,11 @@ function renderInvoicesControlling(){
 
 function renderInvoiceUploadPopup(){
   const draft = state.invoiceDraft || defaultInvoiceDraft();
+  const isEdit = Boolean(state.editingInvoiceId);
   return `
     <div class="popup-overlay" data-action="closeinvoiceupload">
       <div class="popup-box popup-box-wide invoice-popup" onclick="event.stopPropagation()">
-        <h3>Rechnung hochladen</h3>
+        <h3>${isEdit ? 'Rechnung ansehen / bearbeiten' : 'Rechnung hochladen'}</h3>
         ${state.invoiceNotice ? `<div class="notice notice-${state.invoiceNotice.type}">${escapeHtml(state.invoiceNotice.text)}</div>` : ''}
         <div class="invoice-form-grid">
           <div>
@@ -3024,6 +3111,7 @@ function renderInvoiceUploadPopup(){
               <option value="offen" ${draft.status==='offen'?'selected':''}>Offen</option>
               <option value="pruefung" ${draft.status==='pruefung'?'selected':''}>In Prüfung</option>
               <option value="bezahlt" ${draft.status==='bezahlt'?'selected':''}>Bezahlt</option>
+              <option value="archiviert" ${draft.status==='archiviert'?'selected':''}>Archiviert</option>
             </select>
           </div>
           <div>
@@ -3054,7 +3142,7 @@ function renderInvoiceUploadPopup(){
         <textarea class="field" id="inv-note" rows="2">${escapeHtml(draft.note)}</textarea>
         <div class="popup-actions popup-actions-wrap">
           <button class="popup-cancel" data-action="closeinvoiceupload">Abbrechen</button>
-          <button class="submit-btn" data-action="saveinvoice">Speichern</button>
+          <button class="submit-btn" data-action="saveinvoice">${isEdit ? 'Änderungen speichern' : 'Speichern'}</button>
         </div>
       </div>
     </div>
@@ -3567,6 +3655,9 @@ function attachHandlers(){
   document.querySelectorAll('[data-action="openinvoiceupload"]').forEach(el=>{
     el.addEventListener('click', openInvoiceUpload);
   });
+  document.querySelectorAll('[data-action="editinvoice"]').forEach(el=>{
+    el.addEventListener('click', ()=>openInvoiceEdit(el.dataset.id));
+  });
   document.querySelectorAll('[data-action="closeinvoiceupload"]').forEach(el=>{
     el.addEventListener('click', closeInvoiceUpload);
   });
@@ -3594,6 +3685,9 @@ function attachHandlers(){
   });
   document.querySelectorAll('[data-action="invoicepaid"]').forEach(el=>{
     el.addEventListener('click', ()=>setInvoiceStatus(el.dataset.id, 'bezahlt'));
+  });
+  document.querySelectorAll('[data-action="invoicearchived"]').forEach(el=>{
+    el.addEventListener('click', ()=>setInvoiceStatus(el.dataset.id, 'archiviert'));
   });
   document.querySelectorAll('[data-action="deleteinvoice"]').forEach(el=>{
     el.addEventListener('click', ()=>deleteInvoice(el.dataset.id));
