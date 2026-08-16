@@ -10,7 +10,7 @@ Server- und GitHub-Struktur nach dem Vorbild des Opa-Peters-Bestellsystems.
 - `static/style.css` - ausgelagertes Design
 - `static/app.js` - ausgelagerte Programmlogik
 - `static/icons/` - Logo und App-Icons
-- `bestellsystem.db` - SQLite-Datenbank
+- `bestellsystem.db` - SQLite-Datenbank, wird beim ersten Start automatisch erstellt
 - `uploads/`, `order_images/`, `orders/`, `time_exports/` - Serverordner wie beim Referenzsystem
 - `requirements.txt`, `pyproject.toml`, `vercel.json` - Deployment-Dateien
 
@@ -30,6 +30,8 @@ serverfähige Projektstruktur überführt. Die Bestellfunktionen bleiben gleich:
 - Artikelstammdaten, Händler und E-Mail-Empfänger
 - Mehrfachanlage von Artikeln im Geschäftsführungs-Backend
 - CSV-Import für Artikel inklusive herunterladbarer Muster-CSV
+- Rechnungen & Controlling mit Rechnungsupload
+- KI-Auslesung von Rechnungen per OpenAI API
 
 Der wichtigste technische Unterschied:
 
@@ -53,6 +55,28 @@ Optional mit anderem Port:
 ```bash
 PORT=8080 python3 app.py
 ```
+
+## KI-Auslesung fuer Rechnungen
+
+Die Rechnungs-KI liest PDF- oder Bildrechnungen serverseitig aus. Der
+API-Schluessel wird nicht im Browser gespeichert, sondern als Umgebungsvariable
+auf dem Server hinterlegt:
+
+```bash
+OPENAI_API_KEY=sk-... python3 app.py
+```
+
+Optional kann das Modell gewechselt werden:
+
+```bash
+OPENAI_INVOICE_MODEL=gpt-4.1-mini python3 app.py
+```
+
+Beim Hosting auf `inter.opapetersfeinekost.de` muss `OPENAI_API_KEY` im
+Hosting-/Server-Panel als geheime Umgebungsvariable eingetragen werden. Danach
+kann im Bereich `Backend Geschaeftsfuehrung` unter `Rechnungen & Controlling`
+eine Rechnung hochgeladen und mit `Mit KI auslesen` automatisch vorerfasst
+werden.
 
 ## Mehrere Artikel anlegen
 
@@ -82,10 +106,13 @@ müssen auf oberster Ebene liegen, also zum Beispiel:
 - `static/app.js`
 - `static/style.css`
 - `static/index.html`
-- `bestellsystem.db`
 - `requirements.txt`
 - `pyproject.toml`
 - `vercel.json`
+
+Hinweis: Die Datei `bestellsystem.db` ist in diesem GitHub-Paket absichtlich
+nicht enthalten. Sie wird automatisch erzeugt. So werden keine echten
+Bestellungen oder Rechnungen versehentlich bei GitHub hochgeladen.
 
 ## Serverbetrieb
 

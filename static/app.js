@@ -479,7 +479,7 @@ let state = {
   // (Zielauswahl "Produktion/Geschäftsführung" entfernt – Bestellung geht direkt in die Übersicht)
   artikeldaten: {}, // { itemId: { ve: "...", haendler: "..." } }
   editingItem: null, // itemId, das gerade im Popup bearbeitet wird
-  gfTab: "freitagssammlung", // "freitagssammlung" | "monatssammlung" | "artikel" | "haendler" | "email"
+  gfTab: "freitagssammlung", // "freitagssammlung" | "monatssammlung" | "rechnungen" | "artikel" | "haendler" | "email"
   confirmDeleteId: null,
   editingOrderId: null,
   editingOrderDraft: null, // { items: [...], note: '' }
@@ -508,6 +508,15 @@ let state = {
   stammNotice: null,
   stammSearch: "",
   stammOpenCats: new Set(),
+  invoices: [],
+  invoiceUploadOpen: false,
+  invoicePendingFiles: [],
+  invoiceNotice: null,
+  invoiceStatusFilter: "offen",
+  invoiceSearch: "",
+  invoiceDraft: null,
+  invoiceAiLoading: false,
+  pendingInvoiceProduct: null,
 };
 
 async function loadOrders(){
@@ -549,6 +558,12 @@ async function loadOrders(){
     state.deletedItems = res6 ? JSON.parse(res6.value) : [];
   }catch(e){
     state.deletedItems = [];
+  }
+  try{
+    const res7 = await cloudStorage.get('invoices');
+    state.invoices = res7 ? JSON.parse(res7.value) : [];
+  }catch(e){
+    state.invoices = [];
   }
   let seedChanged = false;
   for(const id in ARTIKELDATEN_SEED){
@@ -617,6 +632,14 @@ async function saveHaendlerListe(){
 async function saveNotifyEmails(){
   try{
     await cloudStorage.set('notifyEmails', JSON.stringify(state.notifyEmails));
+  }catch(e){
+    console.error('Speichern fehlgeschlagen', e);
+  }
+}
+
+async function saveInvoices(){
+  try{
+    await cloudStorage.set('invoices', JSON.stringify(state.invoices));
   }catch(e){
     console.error('Speichern fehlgeschlagen', e);
   }
@@ -729,6 +752,421 @@ function findItemKategorie(id){
     if(c.items.some(i=>i.id===id)) return c.cat;
   }
   return null;
+}
+
+function formatEuro(value){
+  const n = Number(value || 0);
+  return n.toLocaleString('de-DE', { style:'currency', currency:'EUR' });
+}
+
+function parseMoneyInput(value){
+  const raw = String(value || '').trim();
+  if(!raw) return 0;
+  const normalized = raw
+    .replace(/\s/g, '')
+    .replace(/[€]/g, '')
+    .replace(/\.(?=\d{3}(\D|$))/g, '')
+    .replace(',', '.');
+  const n = parseFloat(normalized);
+  return Number.isFinite(n) ? Math.round(n * 100) / 100 : 0;
+}
+
+function parseNumberInput(value){
+  const n = parseFloat(String(value || '').replace(',', '.'));
+  return Number.isFinite(n) ? n : 0;
+}
+
+function todayInputValue(){
+  const d = new Date(Date.now() - new Date().getTimezoneOffset() * 60000);
+  return d.toISOString().slice(0, 10);
+}
+
+function monthKeyFromDate(value){
+  const d = value ? new Date(value) : new Date();
+  if(Number.isNaN(d.getTime())) return todayInputValue().slice(0, 7);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+}
+
+function monthLabel(key){
+  const [y, m] = String(key || '').split('-').map(v=>parseInt(v, 10));
+  if(!y || !m) return key || 'Ohne Monat';
+  return new Date(y, m - 1, 1).toLocaleDateString('de-DE', { month:'long', year:'numeric' });
+}
+
+function defaultInvoiceDraft(){
+  return {
+    supplier: "",
+    invoiceNumber: "",
+    invoiceDate: todayInputValue(),
+    dueDate: "",
+    net: "",
+    tax: "",
+    gross: "",
+    taxRate: "19",
+    status: "offen",
+    note: "",
+    itemsText: "",
+  };
+}
+
+function normalizeProductName(value){
+  return String(value || '')
+    .toLowerCase()
+    .replace(/ä/g, 'ae').replace(/ö/g, 'oe').replace(/ü/g, 'ue').replace(/ß/g, 'ss')
+    .replace(/\b(und|mit|der|die|das|dem|den|ein|eine|von|fuer|fur|the|and)\b/g, ' ')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function productTokens(value){
+  return normalizeProductName(value).split(' ').filter(t => t.length > 1);
+}
+
+function productSimilarity(a, b){
+  const na = normalizeProductName(a);
+  const nb = normalizeProductName(b);
+  if(!na || !nb) return 0;
+  if(na === nb) return 1;
+  if(na.includes(nb) || nb.includes(na)) return 0.88;
+  const ta = new Set(productTokens(a));
+  const tb = new Set(productTokens(b));
+  if(ta.size === 0 || tb.size === 0) return 0;
+  let overlap = 0;
+  ta.forEach(t => { if(tb.has(t)) overlap++; });
+  const union = new Set([...ta, ...tb]).size;
+  return overlap / union;
+}
+
+function getInvoiceCatalogItems(){
+  const seen = new Map();
+  ['Laden', 'Produktion'].forEach(bereich => {
+    getCombinedCatalog(bereich).forEach(cat => {
+      cat.items.forEach(it => {
+        if(!seen.has(it.id)){
+          seen.set(it.id, { ...it, bereich, kategorie: cat.cat });
+        }
+      });
+    });
+  });
+  return [...seen.values()];
+}
+
+function findProductSuggestions(productName){
+  return getInvoiceCatalogItems()
+    .map(it => ({ item: it, score: productSimilarity(productName, it.name) }))
+    .filter(entry => entry.score >= 0.45)
+    .sort((a,b) => b.score - a.score)
+    .slice(0, 3);
+}
+
+function parseInvoicePositionLines(text){
+  return String(text || '').split(/\r?\n/).map(line => line.trim()).filter(Boolean).map(line => {
+    const parts = line.split(/[;\t]/).map(p => p.trim());
+    return {
+      name: parts[0] || line,
+      qty: parseNumberInput(parts[1] || '1') || 1,
+      unit: parts[2] || 'Einheiten',
+      net: parseMoneyInput(parts[3] || ''),
+      taxRate: parseNumberInput(parts[4] || ''),
+      reviewStatus: 'offen',
+      matchId: null,
+    };
+  }).filter(item => item.name);
+}
+
+function calculateInvoiceAmounts(draft){
+  const net = parseMoneyInput(draft.net);
+  let tax = parseMoneyInput(draft.tax);
+  let gross = parseMoneyInput(draft.gross);
+  const taxRate = parseNumberInput(draft.taxRate || '19');
+  if(!tax && gross && net) tax = Math.max(0, gross - net);
+  if(!tax && net && taxRate) tax = Math.round(net * taxRate) / 100;
+  if(!gross && net) gross = net + tax;
+  if(!net && gross && tax) return { net: Math.max(0, gross - tax), tax, gross, taxRate };
+  return { net, tax, gross, taxRate };
+}
+
+function invoiceStatusLabel(status){
+  const labels = {
+    neu: 'Neu',
+    pruefung: 'In Prüfung',
+    offen: 'Offen',
+    bezahlt: 'Bezahlt',
+    archiviert: 'Archiviert',
+  };
+  return labels[status] || 'Offen';
+}
+
+function isInvoiceOpen(invoice){
+  return !['bezahlt', 'archiviert'].includes(invoice.status || 'offen');
+}
+
+function getInvoiceReviewForLine(line){
+  if(!line || !line.name) return { state:'empty', suggestions: [] };
+  if(line.reviewStatus === 'linked' || line.matchId) return { state:'linked', suggestions: [] };
+  if(line.reviewStatus === 'newItemCreated') return { state:'newItemCreated', suggestions: [] };
+  if(line.reviewStatus === 'ignored') return { state:'ignored', suggestions: [] };
+  const suggestions = findProductSuggestions(line.name);
+  if(suggestions[0]?.score >= 0.9) return { state:'known', suggestions };
+  return { state:'review', suggestions };
+}
+
+function getPendingInvoiceFindings(){
+  return state.invoices.flatMap(invoice => (invoice.items || []).map((line, index) => {
+    const review = getInvoiceReviewForLine(line);
+    return { invoice, line, index, review };
+  })).filter(entry => entry.review.state === 'review');
+}
+
+function readInvoiceDraftFromDom(){
+  if(!state.invoiceUploadOpen) return state.invoiceDraft || defaultInvoiceDraft();
+  return {
+    supplier: document.getElementById('inv-supplier')?.value.trim() || '',
+    invoiceNumber: document.getElementById('inv-number')?.value.trim() || '',
+    invoiceDate: document.getElementById('inv-date')?.value || todayInputValue(),
+    dueDate: document.getElementById('inv-due')?.value || '',
+    net: document.getElementById('inv-net')?.value || '',
+    tax: document.getElementById('inv-tax')?.value || '',
+    gross: document.getElementById('inv-gross')?.value || '',
+    taxRate: document.getElementById('inv-taxrate')?.value || '19',
+    status: document.getElementById('inv-status')?.value || 'offen',
+    note: document.getElementById('inv-note')?.value.trim() || '',
+    itemsText: document.getElementById('inv-items')?.value || '',
+  };
+}
+
+function openInvoiceUpload(){
+  state.invoiceDraft = defaultInvoiceDraft();
+  state.invoicePendingFiles = [];
+  state.invoiceUploadOpen = true;
+  state.invoiceNotice = null;
+  render();
+}
+
+function closeInvoiceUpload(){
+  state.invoiceUploadOpen = false;
+  state.invoicePendingFiles = [];
+  state.invoiceDraft = null;
+  render();
+}
+
+function readInvoiceFile(file){
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = e => resolve({
+      name: file.name,
+      type: file.type || 'application/octet-stream',
+      size: file.size,
+      dataUrl: e.target.result,
+    });
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
+async function handleInvoiceFiles(fileList){
+  state.invoiceDraft = readInvoiceDraftFromDom();
+  const files = Array.from(fileList || []);
+  if(files.length === 0) return;
+  try{
+    const readFiles = await Promise.all(files.map(readInvoiceFile));
+    state.invoicePendingFiles.push(...readFiles);
+    render();
+  }catch(e){
+    state.invoiceNotice = { type:'error', text:'Eine Rechnungsdatei konnte nicht gelesen werden.' };
+    render();
+  }
+}
+
+function removeInvoicePendingFile(index){
+  state.invoiceDraft = readInvoiceDraftFromDom();
+  state.invoicePendingFiles.splice(index, 1);
+  render();
+}
+
+function formatMoneyInputFromNumber(value){
+  const n = Number(value || 0);
+  if(!Number.isFinite(n) || n === 0) return '';
+  return n.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function normalizeInputDate(value){
+  const text = String(value || '').trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : '';
+}
+
+function applyAiInvoiceExtraction(extracted){
+  const current = readInvoiceDraftFromDom();
+  const items = Array.isArray(extracted.items) ? extracted.items : [];
+  const warnings = Array.isArray(extracted.warnings) ? extracted.warnings.filter(Boolean) : [];
+  const confidence = extracted.confidence || {};
+  const confidenceText = Number.isFinite(Number(confidence.overall))
+    ? `KI-Sicherheit: ${Math.round(Number(confidence.overall) * 100)} %.`
+    : 'KI-Sicherheit: bitte prüfen.';
+
+  state.invoiceDraft = {
+    ...current,
+    supplier: extracted.supplier || current.supplier,
+    invoiceNumber: extracted.invoice_number || current.invoiceNumber,
+    invoiceDate: normalizeInputDate(extracted.invoice_date) || current.invoiceDate,
+    dueDate: normalizeInputDate(extracted.due_date) || current.dueDate,
+    net: formatMoneyInputFromNumber(extracted.net_amount) || current.net,
+    tax: formatMoneyInputFromNumber(extracted.tax_amount) || current.tax,
+    gross: formatMoneyInputFromNumber(extracted.gross_amount) || current.gross,
+    taxRate: extracted.tax_rate ? String(extracted.tax_rate).replace('.', ',') : current.taxRate,
+    status: current.status || 'offen',
+    note: [current.note, confidenceText, ...warnings.map(w => `KI-Hinweis: ${w}`)].filter(Boolean).join('\n'),
+    itemsText: items.map(item => [
+      item.name || '',
+      item.quantity || 1,
+      item.unit || 'Einheiten',
+      formatMoneyInputFromNumber(item.net_amount),
+      item.tax_rate || extracted.tax_rate || '',
+    ].join('; ')).join('\n') || current.itemsText,
+  };
+}
+
+async function extractInvoiceWithAi(){
+  if(state.invoicePendingFiles.length === 0){
+    state.invoiceDraft = readInvoiceDraftFromDom();
+    state.invoiceNotice = { type:'error', text:'Bitte zuerst eine PDF- oder Bild-Rechnung auswählen.' };
+    render();
+    return;
+  }
+  state.invoiceDraft = readInvoiceDraftFromDom();
+  state.invoiceAiLoading = true;
+  state.invoiceNotice = { type:'success', text:'KI liest die Rechnung aus. Das kann einen Moment dauern.' };
+  render();
+
+  try{
+    const res = await fetch('/api/invoices/extract', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ files: state.invoicePendingFiles }),
+    });
+    let data = {};
+    try{ data = await res.json(); }catch(e){ data = {}; }
+    if(!res.ok || !data.ok){
+      const detail = data.detail ? ` (${data.detail})` : '';
+      throw new Error((data.error || 'KI-Auslesung fehlgeschlagen.') + detail);
+    }
+    applyAiInvoiceExtraction(data.invoice || {});
+    state.invoiceNotice = { type:'success', text:'Rechnung wurde per KI ausgelesen. Bitte kurz prüfen und speichern.' };
+  }catch(e){
+    state.invoiceNotice = { type:'error', text:e.message || 'KI-Auslesung fehlgeschlagen.' };
+  }finally{
+    state.invoiceAiLoading = false;
+    render();
+  }
+}
+
+async function saveInvoiceFromDraft(){
+  const draft = readInvoiceDraftFromDom();
+  const amounts = calculateInvoiceAmounts(draft);
+  const items = parseInvoicePositionLines(draft.itemsText);
+  if(!draft.supplier && state.invoicePendingFiles.length === 0){
+    state.invoiceNotice = { type:'error', text:'Bitte mindestens einen Lieferanten oder eine Datei hinterlegen.' };
+    state.invoiceDraft = draft;
+    render();
+    return;
+  }
+  const invoice = {
+    id: 'inv' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+    supplier: draft.supplier || 'Ohne Lieferant',
+    invoiceNumber: draft.invoiceNumber,
+    invoiceDate: draft.invoiceDate || todayInputValue(),
+    dueDate: draft.dueDate,
+    net: amounts.net,
+    tax: amounts.tax,
+    gross: amounts.gross,
+    taxRate: amounts.taxRate,
+    status: draft.status || 'offen',
+    note: draft.note,
+    files: [...state.invoicePendingFiles],
+    items,
+    createdAt: new Date().toISOString(),
+  };
+  state.invoices.unshift(invoice);
+  if(invoice.supplier && !state.haendlerListe.includes(invoice.supplier)){
+    state.haendlerListe.push(invoice.supplier);
+    await saveHaendlerListe();
+  }
+  await saveInvoices();
+  state.invoiceUploadOpen = false;
+  state.invoicePendingFiles = [];
+  state.invoiceDraft = null;
+  state.invoiceNotice = { type:'success', text:'Rechnung wurde gespeichert und mit den Artikelstammdaten abgeglichen.' };
+  render();
+}
+
+async function setInvoiceStatus(invoiceId, status){
+  const invoice = state.invoices.find(inv => inv.id === invoiceId);
+  if(!invoice) return;
+  invoice.status = status;
+  await saveInvoices();
+  render();
+}
+
+async function deleteInvoice(invoiceId){
+  const invoice = state.invoices.find(inv => inv.id === invoiceId);
+  if(!invoice) return;
+  if(!confirm(`Rechnung von "${invoice.supplier}" wirklich löschen?`)) return;
+  state.invoices = state.invoices.filter(inv => inv.id !== invoiceId);
+  await saveInvoices();
+  render();
+}
+
+async function linkInvoiceProduct(invoiceId, lineIndex, itemId){
+  const invoice = state.invoices.find(inv => inv.id === invoiceId);
+  const line = invoice?.items?.[Number(lineIndex)];
+  const item = findItem(itemId);
+  if(!invoice || !line || !item) return;
+  if(!confirm(`"${line.name}" mit "${item.name}" zusammenfassen?`)) return;
+  line.matchId = itemId;
+  line.reviewStatus = 'linked';
+  await saveInvoices();
+  render();
+}
+
+async function ignoreInvoiceProduct(invoiceId, lineIndex){
+  const invoice = state.invoices.find(inv => inv.id === invoiceId);
+  const line = invoice?.items?.[Number(lineIndex)];
+  if(!line) return;
+  line.reviewStatus = 'ignored';
+  await saveInvoices();
+  render();
+}
+
+function openNewItemFromInvoice(invoiceId, lineIndex){
+  const invoice = state.invoices.find(inv => inv.id === invoiceId);
+  const line = invoice?.items?.[Number(lineIndex)];
+  if(!invoice || !line) return;
+  const kategorien = getAllKategorien();
+  state.pendingInvoiceProduct = { invoiceId, lineIndex: Number(lineIndex) };
+  state.newItem = {
+    name: line.name,
+    kategorie: kategorien.includes('Handelsware') ? 'Handelsware' : (kategorien[0] || ''),
+    bereich: 'Laden',
+    unit: line.unit || 'Einheiten',
+    ve: '',
+    haendler: invoice.supplier || '',
+    rhythmus: 'beide',
+  };
+  state.newItemPopupOpen = true;
+  render();
+}
+
+function setInvoiceStatusFilter(filter){
+  state.invoiceStatusFilter = filter;
+  render();
+}
+
+function setInvoiceSearch(value){
+  state.invoiceSearch = value;
+  render();
+  const s = document.getElementById('invoice-search-input');
+  if(s){ s.focus(); s.setSelectionRange(s.value.length, s.value.length); }
 }
 
 function cartCount(){
@@ -1359,7 +1797,14 @@ async function sendChatMessage(orderId){
   render();
 }
 function setBereichFilter(b){ state.bereichFilter = b; render(); }
-function setGfTab(t){ state.gfTab = t; state.editingItem = null; state.sammlungOffset = 0; render(); }
+function setGfTab(t){
+  state.gfTab = t;
+  state.editingItem = null;
+  state.invoiceUploadOpen = false;
+  state.pendingInvoiceProduct = null;
+  state.sammlungOffset = 0;
+  render();
+}
 function toggleStammCat(cat){
   if(state.stammOpenCats.has(cat)) state.stammOpenCats.delete(cat);
   else state.stammOpenCats.add(cat);
@@ -1458,6 +1903,7 @@ function openNewItemPopup(){
 
 function closeNewItemPopup(){
   state.newItemPopupOpen = false;
+  state.pendingInvoiceProduct = null;
   render();
 }
 
@@ -1481,6 +1927,18 @@ async function saveNewItem(){
   await saveCustomItems();
   state.artikeldaten[id] = { ve: ni.ve.trim(), haendler, rhythmus };
   await saveArtikeldaten();
+  if(state.pendingInvoiceProduct){
+    const { invoiceId, lineIndex } = state.pendingInvoiceProduct;
+    const invoice = state.invoices.find(inv => inv.id === invoiceId);
+    const line = invoice?.items?.[lineIndex];
+    if(line){
+      line.matchId = id;
+      line.reviewStatus = 'newItemCreated';
+      await saveInvoices();
+      state.invoiceNotice = { type:'success', text:`"${ni.name.trim()}" wurde als neuer Artikel angelegt.` };
+    }
+    state.pendingInvoiceProduct = null;
+  }
   state.newItemPopupOpen = false;
   render();
 }
@@ -2286,6 +2744,7 @@ function renderEmpfangSeite(){
     <div class="tabs">
       <button class="tab ${state.gfTab==='freitagssammlung'?'active':''}" data-action="gftab" data-gftab="freitagssammlung">📦 Freitags-Sammlung</button>
       <button class="tab ${state.gfTab==='monatssammlung'?'active':''}" data-action="gftab" data-gftab="monatssammlung">📅 Monats-Sammlung</button>
+      <button class="tab ${state.gfTab==='rechnungen'?'active':''}" data-action="gftab" data-gftab="rechnungen">Rechnungen & Controlling</button>
       <button class="tab ${state.gfTab==='artikel'?'active':''}" data-action="gftab" data-gftab="artikel">Artikelstammdaten (VE/Händler)</button>
       <button class="tab ${state.gfTab==='haendler'?'active':''}" data-action="gftab" data-gftab="haendler">Händler verwalten</button>
       <button class="tab ${state.gfTab==='email'?'active':''}" data-action="gftab" data-gftab="email">E-Mail-Empfänger</button>
@@ -2317,6 +2776,22 @@ function renderEmpfangSeite(){
       </div>
       ${tabsHtml}
       ${renderEmailEinstellungen()}
+    `;
+  }
+
+  if(state.gfTab === 'rechnungen'){
+    return `
+      <div class="masthead">
+        <div>
+          <p class="eyebrow">Backend Geschäftsführung</p>
+          <h1>Rechnungen & Controlling</h1>
+        </div>
+        <div class="meta"><button class="switch-role" data-action="role" data-role="">🏠 Zum Home-Bildschirm</button></div>
+      </div>
+      ${tabsHtml}
+      ${renderInvoicesControlling()}
+      ${state.invoiceUploadOpen ? renderInvoiceUploadPopup() : ''}
+      ${state.newItemPopupOpen ? renderNewItemPopup() : ''}
     `;
   }
 
@@ -2362,6 +2837,227 @@ function renderEmpfangSeite(){
     </div>
     ${tabsHtml}
     ${renderSammlung('freitag', null, false)}
+  `;
+}
+
+function renderInvoicesControlling(){
+  const offene = state.invoices.filter(isInvoiceOpen);
+  const offeneSumme = offene.reduce((sum, inv) => sum + Number(inv.gross || 0), 0);
+  const findings = getPendingInvoiceFindings();
+  const taxByMonth = {};
+  state.invoices.forEach(inv => {
+    const key = monthKeyFromDate(inv.invoiceDate || inv.createdAt);
+    taxByMonth[key] = (taxByMonth[key] || 0) + Number(inv.tax || 0);
+  });
+  const taxRows = Object.keys(taxByMonth).sort().reverse().slice(0, 12);
+  const currentMonthTax = taxByMonth[todayInputValue().slice(0, 7)] || 0;
+
+  const q = state.invoiceSearch.trim().toLowerCase();
+  const filteredInvoices = state.invoices.filter(inv => {
+    if(state.invoiceStatusFilter !== 'alle' && (inv.status || 'offen') !== state.invoiceStatusFilter) return false;
+    if(!q) return true;
+    return [
+      inv.supplier,
+      inv.invoiceNumber,
+      inv.note,
+      ...(inv.items || []).map(it => it.name),
+    ].join(' ').toLowerCase().includes(q);
+  });
+
+  const findingsHtml = findings.length === 0
+    ? `<p class="no-results">Keine neuen Produkte mit Prüfbedarf.</p>`
+    : findings.slice(0, 30).map(({ invoice, line, index, review }) => `
+      <div class="invoice-review-row">
+        <div class="invoice-review-main">
+          <div class="item-name">${escapeHtml(line.name)}</div>
+          <div class="item-unit">${escapeHtml(invoice.supplier || 'Ohne Lieferant')} · Rechnung ${escapeHtml(invoice.invoiceNumber || invoice.id)}</div>
+        </div>
+        <div class="invoice-review-actions">
+          ${(review.suggestions || []).map(s => `
+            <button class="edit-btn" data-action="linkinvoiceproduct" data-invoice="${invoice.id}" data-index="${index}" data-item="${s.item.id}">
+              Zusammenfassen: ${escapeHtml(s.item.name)}
+            </button>
+          `).join('')}
+          <button class="new-item-btn" data-action="newitemfrominvoice" data-invoice="${invoice.id}" data-index="${index}">Als neuen Artikel anlegen</button>
+          <button class="popup-cancel invoice-small-btn" data-action="ignoreinvoiceproduct" data-invoice="${invoice.id}" data-index="${index}">Später</button>
+        </div>
+      </div>
+    `).join('');
+
+  const invoicesHtml = filteredInvoices.length === 0
+    ? `<p class="no-results">Keine Rechnungen gefunden.</p>`
+    : filteredInvoices.map(inv => {
+      const status = inv.status || 'offen';
+      const date = inv.invoiceDate ? new Date(inv.invoiceDate).toLocaleDateString('de-DE') : 'ohne Datum';
+      const due = inv.dueDate ? ` · fällig ${new Date(inv.dueDate).toLocaleDateString('de-DE')}` : '';
+      const files = inv.files || [];
+      const reviewCount = (inv.items || []).filter(line => getInvoiceReviewForLine(line).state === 'review').length;
+      return `
+        <div class="sammel-card invoice-card">
+          <div class="sammel-card-head">
+            <div>
+              <p class="group-title">${escapeHtml(inv.supplier || 'Ohne Lieferant')}</p>
+              <div class="item-unit">Rechnung ${escapeHtml(inv.invoiceNumber || 'ohne Nummer')} · ${date}${due}</div>
+            </div>
+            <span class="status-pill invoice-status-${status}">${invoiceStatusLabel(status)}</span>
+          </div>
+          <div class="invoice-amount-grid">
+            <div><span>Netto</span><strong>${formatEuro(inv.net)}</strong></div>
+            <div><span>Vorsteuer</span><strong>${formatEuro(inv.tax)}</strong></div>
+            <div><span>Brutto</span><strong>${formatEuro(inv.gross)}</strong></div>
+            <div><span>Positionen</span><strong>${(inv.items || []).length}</strong></div>
+          </div>
+          ${reviewCount ? `<div class="notice notice-error invoice-card-notice">${reviewCount} neue/ähnliche Produktposition(en) benötigen eine Entscheidung.</div>` : ''}
+          ${files.length ? `
+            <div class="invoice-files">
+              ${files.map(file => `
+                <a class="invoice-file-link" href="${file.dataUrl}" download="${escapeHtml(file.name)}">${escapeHtml(file.name)}</a>
+              `).join('')}
+            </div>
+          ` : ''}
+          ${inv.note ? `<p class="order-note">${escapeHtml(inv.note)}</p>` : ''}
+          <div class="order-actions">
+            <button class="btn-reopen" data-action="invoicepruefung" data-id="${inv.id}">In Prüfung</button>
+            <button class="btn-reopen" data-action="invoiceopen" data-id="${inv.id}">Offen</button>
+            <button class="btn-complete" data-action="invoicepaid" data-id="${inv.id}">Bezahlt</button>
+            <button class="danger-outline" data-action="deleteinvoice" data-id="${inv.id}">Löschen</button>
+          </div>
+        </div>
+      `;
+    }).join('');
+
+  return `
+    <div class="invoice-kpi-grid">
+      <div class="sammel-stat"><span class="sammel-stat-num">${offene.length}</span><span class="sammel-stat-label">Offene Rechnungen</span></div>
+      <div class="sammel-stat"><span class="sammel-stat-num">${formatEuro(offeneSumme)}</span><span class="sammel-stat-label">Offene Summe</span></div>
+      <div class="sammel-stat"><span class="sammel-stat-num">${formatEuro(currentMonthTax)}</span><span class="sammel-stat-label">Vorsteuer aktueller Monat</span></div>
+      <div class="sammel-stat"><span class="sammel-stat-num">${findings.length}</span><span class="sammel-stat-label">Neue Produkte erkannt</span></div>
+    </div>
+
+    ${state.invoiceNotice ? `<div class="notice notice-${state.invoiceNotice.type}">${escapeHtml(state.invoiceNotice.text)}</div>` : ''}
+
+    <div class="stamm-toolbar invoice-toolbar">
+      <input class="search-box" id="invoice-search-input" type="text" placeholder="Rechnung, Lieferant oder Produkt suchen…" value="${escapeHtml(state.invoiceSearch)}" />
+      <div class="stamm-actions">
+        <button class="new-item-btn" data-action="openinvoiceupload">+ Rechnung hochladen</button>
+      </div>
+    </div>
+
+    <div class="tabs invoice-filter-tabs">
+      ${['offen','pruefung','bezahlt','archiviert','alle'].map(status => `
+        <button class="tab ${state.invoiceStatusFilter===status?'active':''}" data-action="invoicefilter" data-filter="${status}">${status === 'alle' ? 'Alle' : invoiceStatusLabel(status)}</button>
+      `).join('')}
+    </div>
+
+    <div class="invoice-section-grid">
+      <div class="sammel-card">
+        <div class="sammel-card-head">
+          <p class="group-title">Vorsteuer pro Monat</p>
+          <span class="sammel-count">${taxRows.length} Monat(e)</span>
+        </div>
+        ${taxRows.length === 0 ? `<p class="no-results">Noch keine Rechnungsdaten.</p>` : taxRows.map(key => `
+          <div class="sammel-item-line">
+            <span class="sammel-item-name">${monthLabel(key)}</span>
+            <span class="sammel-qty-chip">${formatEuro(taxByMonth[key])}</span>
+          </div>
+        `).join('')}
+      </div>
+      <div class="sammel-card">
+        <div class="sammel-card-head">
+          <p class="group-title">Neue Produkte erkannt</p>
+          <span class="sammel-count">${findings.length} offen</span>
+        </div>
+        ${findingsHtml}
+      </div>
+    </div>
+
+    <div class="cat-block">
+      <p class="cat-title c-blue">Rechnungen</p>
+      ${invoicesHtml}
+    </div>
+  `;
+}
+
+function renderInvoiceUploadPopup(){
+  const draft = state.invoiceDraft || defaultInvoiceDraft();
+  return `
+    <div class="popup-overlay" data-action="closeinvoiceupload">
+      <div class="popup-box popup-box-wide invoice-popup" onclick="event.stopPropagation()">
+        <h3>Rechnung hochladen</h3>
+        ${state.invoiceNotice ? `<div class="notice notice-${state.invoiceNotice.type}">${escapeHtml(state.invoiceNotice.text)}</div>` : ''}
+        <div class="invoice-form-grid">
+          <div>
+            <label class="field">Lieferant</label>
+            <input class="field" id="inv-supplier" type="text" placeholder="z. B. Viani" value="${escapeHtml(draft.supplier)}" />
+          </div>
+          <div>
+            <label class="field">Rechnungsnummer</label>
+            <input class="field" id="inv-number" type="text" value="${escapeHtml(draft.invoiceNumber)}" />
+          </div>
+          <div>
+            <label class="field">Rechnungsdatum</label>
+            <input class="field" id="inv-date" type="date" value="${escapeHtml(draft.invoiceDate)}" />
+          </div>
+          <div>
+            <label class="field">Fällig am</label>
+            <input class="field" id="inv-due" type="date" value="${escapeHtml(draft.dueDate)}" />
+          </div>
+          <div>
+            <label class="field">Netto</label>
+            <input class="field" id="inv-net" type="text" inputmode="decimal" placeholder="0,00" value="${escapeHtml(draft.net)}" />
+          </div>
+          <div>
+            <label class="field">Vorsteuer</label>
+            <input class="field" id="inv-tax" type="text" inputmode="decimal" placeholder="0,00" value="${escapeHtml(draft.tax)}" />
+          </div>
+          <div>
+            <label class="field">Brutto</label>
+            <input class="field" id="inv-gross" type="text" inputmode="decimal" placeholder="0,00" value="${escapeHtml(draft.gross)}" />
+          </div>
+          <div>
+            <label class="field">Steuersatz %</label>
+            <input class="field" id="inv-taxrate" type="text" inputmode="decimal" value="${escapeHtml(draft.taxRate)}" />
+          </div>
+          <div>
+            <label class="field">Status</label>
+            <select class="field" id="inv-status">
+              <option value="offen" ${draft.status==='offen'?'selected':''}>Offen</option>
+              <option value="pruefung" ${draft.status==='pruefung'?'selected':''}>In Prüfung</option>
+              <option value="bezahlt" ${draft.status==='bezahlt'?'selected':''}>Bezahlt</option>
+            </select>
+          </div>
+          <div>
+            <label class="field">Datei(en)</label>
+            <label class="invoice-file-upload" for="inv-files">PDF/Bild auswählen</label>
+            <input type="file" id="inv-files" multiple accept=".pdf,application/pdf,image/*" style="display:none;" />
+          </div>
+        </div>
+        ${state.invoicePendingFiles.length ? `
+          <div class="invoice-pending-files">
+            ${state.invoicePendingFiles.map((file, i) => `
+              <span class="invoice-file-chip">${escapeHtml(file.name)} <button data-action="removeinvoicependingfile" data-index="${i}" aria-label="Datei entfernen">×</button></span>
+            `).join('')}
+          </div>
+        ` : ''}
+        <div class="invoice-ai-panel">
+          <div>
+            <strong>KI-Auslesung</strong>
+            <span>PDF oder Foto hochladen, dann automatisch Rechnungsnummer, Beträge, Steuer und Positionen erfassen lassen.</span>
+          </div>
+          <button class="new-item-btn" data-action="extractinvoiceai" ${state.invoiceAiLoading || state.invoicePendingFiles.length === 0 ? 'disabled' : ''}>
+            ${state.invoiceAiLoading ? 'KI liest aus…' : 'Mit KI auslesen'}
+          </button>
+        </div>
+        <label class="field">Produktpositionen</label>
+        <textarea class="field" id="inv-items" rows="5" placeholder="Produktname; Menge; Einheit; Netto; Steuersatz">${escapeHtml(draft.itemsText)}</textarea>
+        <label class="field">Notiz</label>
+        <textarea class="field" id="inv-note" rows="2">${escapeHtml(draft.note)}</textarea>
+        <div class="popup-actions popup-actions-wrap">
+          <button class="popup-cancel" data-action="closeinvoiceupload">Abbrechen</button>
+          <button class="submit-btn" data-action="saveinvoice">Speichern</button>
+        </div>
+      </div>
+    </div>
   `;
 }
 
@@ -2867,6 +3563,49 @@ function attachHandlers(){
   });
   document.querySelectorAll('[data-action="gftab"]').forEach(el=>{
     el.addEventListener('click', ()=>setGfTab(el.dataset.gftab));
+  });
+  document.querySelectorAll('[data-action="openinvoiceupload"]').forEach(el=>{
+    el.addEventListener('click', openInvoiceUpload);
+  });
+  document.querySelectorAll('[data-action="closeinvoiceupload"]').forEach(el=>{
+    el.addEventListener('click', closeInvoiceUpload);
+  });
+  document.querySelectorAll('[data-action="saveinvoice"]').forEach(el=>{
+    el.addEventListener('click', saveInvoiceFromDraft);
+  });
+  document.querySelectorAll('[data-action="removeinvoicependingfile"]').forEach(el=>{
+    el.addEventListener('click', ()=>removeInvoicePendingFile(parseInt(el.dataset.index, 10)));
+  });
+  document.querySelectorAll('[data-action="extractinvoiceai"]').forEach(el=>{
+    el.addEventListener('click', extractInvoiceWithAi);
+  });
+  const invFiles = document.getElementById('inv-files');
+  if(invFiles) invFiles.addEventListener('change', e=>{ handleInvoiceFiles(e.target.files); invFiles.value = ''; });
+  const invoiceSearch = document.getElementById('invoice-search-input');
+  if(invoiceSearch) invoiceSearch.addEventListener('input', e=>setInvoiceSearch(e.target.value));
+  document.querySelectorAll('[data-action="invoicefilter"]').forEach(el=>{
+    el.addEventListener('click', ()=>setInvoiceStatusFilter(el.dataset.filter));
+  });
+  document.querySelectorAll('[data-action="invoicepruefung"]').forEach(el=>{
+    el.addEventListener('click', ()=>setInvoiceStatus(el.dataset.id, 'pruefung'));
+  });
+  document.querySelectorAll('[data-action="invoiceopen"]').forEach(el=>{
+    el.addEventListener('click', ()=>setInvoiceStatus(el.dataset.id, 'offen'));
+  });
+  document.querySelectorAll('[data-action="invoicepaid"]').forEach(el=>{
+    el.addEventListener('click', ()=>setInvoiceStatus(el.dataset.id, 'bezahlt'));
+  });
+  document.querySelectorAll('[data-action="deleteinvoice"]').forEach(el=>{
+    el.addEventListener('click', ()=>deleteInvoice(el.dataset.id));
+  });
+  document.querySelectorAll('[data-action="linkinvoiceproduct"]').forEach(el=>{
+    el.addEventListener('click', ()=>linkInvoiceProduct(el.dataset.invoice, el.dataset.index, el.dataset.item));
+  });
+  document.querySelectorAll('[data-action="ignoreinvoiceproduct"]').forEach(el=>{
+    el.addEventListener('click', ()=>ignoreInvoiceProduct(el.dataset.invoice, el.dataset.index));
+  });
+  document.querySelectorAll('[data-action="newitemfrominvoice"]').forEach(el=>{
+    el.addEventListener('click', ()=>openNewItemFromInvoice(el.dataset.invoice, el.dataset.index));
   });
   document.querySelectorAll('[data-action="togglestammcat"]').forEach(el=>{
     el.addEventListener('click', ()=>toggleStammCat(el.dataset.cat));

@@ -512,6 +512,7 @@
     cursor:pointer;box-shadow:0 4px 10px rgba(35,58,82,.2);
   }
   .new-item-btn:hover{background:var(--navy-dark);}
+  .new-item-btn:disabled{background:var(--surface-2);color:var(--ink-soft);cursor:not-allowed;box-shadow:none;}
   .haendler-row-actions{display:flex;gap:8px;}
   .notice{
     margin:0 0 16px;padding:11px 13px;border-radius:var(--radius-sm);
@@ -519,6 +520,85 @@
   }
   .notice-success{background:#E8F4ED;color:#1F6B44;border:1px solid #B7DDC5;}
   .notice-error{background:#FDECEC;color:#A33A2F;border:1px solid #F2BDB7;}
+
+  .invoice-kpi-grid{
+    display:grid;grid-template-columns:repeat(4, minmax(140px, 1fr));
+    gap:12px;margin-bottom:18px;
+  }
+  .invoice-kpi-grid .sammel-stat-num{
+    font-size:clamp(18px, 2vw, 24px);
+    white-space:normal;word-break:break-word;
+  }
+  .invoice-toolbar{align-items:flex-start;margin-bottom:4px;}
+  .invoice-filter-tabs{margin-bottom:18px;}
+  .invoice-section-grid{
+    display:grid;grid-template-columns:minmax(260px, .9fr) minmax(320px, 1.1fr);
+    gap:16px;margin-bottom:24px;align-items:start;
+  }
+  .invoice-card .sammel-card-head{align-items:flex-start;}
+  .invoice-amount-grid{
+    display:grid;grid-template-columns:repeat(4, minmax(100px, 1fr));
+    gap:10px;margin-bottom:12px;
+  }
+  .invoice-amount-grid div{
+    background:var(--bg);border:1px solid var(--line);border-radius:var(--radius-sm);
+    padding:10px 12px;
+  }
+  .invoice-amount-grid span{
+    display:block;font-size:10.5px;font-weight:800;text-transform:uppercase;
+    letter-spacing:.05em;color:var(--ink-soft);margin-bottom:4px;
+  }
+  .invoice-amount-grid strong{font-size:14px;color:var(--navy-dark);}
+  .invoice-files{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0;}
+  .invoice-file-link,
+  .invoice-file-chip{
+    display:inline-flex;align-items:center;gap:7px;
+    border:1px solid var(--line);border-radius:var(--radius-sm);
+    background:var(--surface-2);color:var(--navy);
+    padding:7px 10px;font-size:12.5px;font-weight:700;text-decoration:none;
+    max-width:100%;word-break:break-word;
+  }
+  .invoice-file-link:hover{border-color:var(--navy);background:var(--blue-bg);}
+  .invoice-card-notice{margin:10px 0 0;}
+  .invoice-status-pruefung{background:var(--gold-bg);color:var(--gold);}
+  .invoice-status-offen{background:var(--terracotta-bg);color:var(--terracotta);}
+  .invoice-status-bezahlt{background:var(--green-bg);color:var(--green);}
+  .invoice-status-archiviert{background:var(--surface-2);color:var(--ink-soft);}
+  .invoice-review-row{
+    display:flex;justify-content:space-between;gap:12px;align-items:flex-start;
+    border-bottom:1px solid var(--line);padding:12px 0;
+  }
+  .invoice-review-row:last-child{border-bottom:none;}
+  .invoice-review-main{min-width:180px;flex:1;}
+  .invoice-review-actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;}
+  .invoice-small-btn{flex:0 0 auto;padding:9px 14px;font-size:13px;}
+  .invoice-popup{max-width:min(980px, 96vw);}
+  .invoice-form-grid{
+    display:grid;grid-template-columns:repeat(4, minmax(140px, 1fr));
+    gap:12px;
+  }
+  .invoice-file-upload{
+    display:flex;align-items:center;justify-content:center;
+    min-height:42px;border:1.5px dashed var(--line);border-radius:var(--radius-sm);
+    background:var(--bg);color:var(--navy);font-size:13.5px;font-weight:800;
+    cursor:pointer;padding:10px 12px;text-align:center;
+  }
+  .invoice-file-upload:hover{border-color:var(--navy);background:var(--surface-2);}
+  .invoice-pending-files{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0 4px;}
+  .invoice-file-chip button{
+    width:18px;height:18px;border:none;border-radius:50%;
+    background:rgba(22,40,59,.15);color:var(--navy);font-weight:800;cursor:pointer;
+    line-height:1;padding:0;
+  }
+  .invoice-file-chip button:hover{background:rgba(22,40,59,.28);}
+  .invoice-ai-panel{
+    display:flex;align-items:center;justify-content:space-between;gap:14px;
+    margin:16px 0 4px;padding:14px;border:1px solid var(--line);
+    border-left:4px solid var(--blue);border-radius:var(--radius-sm);
+    background:var(--blue-bg);
+  }
+  .invoice-ai-panel strong{display:block;font-size:13.5px;color:var(--navy-dark);margin-bottom:3px;}
+  .invoice-ai-panel span{display:block;font-size:12.5px;color:var(--ink-soft);line-height:1.45;}
 
   .popup-box-wide{max-width:min(1120px, 96vw);}
   .bulk-item-table{display:grid;gap:8px;margin-top:14px;}
@@ -596,6 +676,13 @@
      MOBILE-ANPASSUNGEN
   ============================================================ */
   @media(max-width:900px){
+    .invoice-kpi-grid{grid-template-columns:repeat(2, minmax(140px, 1fr));}
+    .invoice-section-grid{grid-template-columns:1fr;}
+    .invoice-form-grid{grid-template-columns:repeat(2, minmax(140px, 1fr));}
+    .invoice-amount-grid{grid-template-columns:repeat(2, minmax(120px, 1fr));}
+    .invoice-review-row{flex-direction:column;}
+    .invoice-review-actions{justify-content:flex-start;}
+    .invoice-ai-panel{flex-direction:column;align-items:stretch;}
     .bulk-item-table-head{display:none;}
     .bulk-item-row{
       grid-template-columns:1fr 1fr;
@@ -646,6 +733,12 @@
     .bulk-item-row{
       grid-template-columns:1fr;
     }
+    .invoice-kpi-grid,
+    .invoice-form-grid,
+    .invoice-amount-grid{grid-template-columns:1fr;}
+    .invoice-review-actions .edit-btn,
+    .invoice-review-actions .new-item-btn,
+    .invoice-small-btn{width:100%;text-align:center;}
     .popup-actions-wrap .popup-cancel,
     .popup-actions-wrap .edit-btn,
     .popup-actions-wrap .submit-btn{width:100%;max-width:none;}
