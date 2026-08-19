@@ -3,13 +3,20 @@
 # Start: python3 app.py, dann http://127.0.0.1:8000 oeffnen
 
 import json
+import base64
+import imaplib
 import mimetypes
 import os
+import re
 import shutil
 import sqlite3
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from email import policy
+from email.header import decode_header, make_header
+from email.parser import BytesParser
+from email.utils import parsedate_to_datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -34,8 +41,9 @@ PORT = int(os.environ.get("PORT", "8000"))
 APP_NAME = "Gebrueder Pesch Bestellsystem"
 APP_SHORT_NAME = "Pesch Bestellung"
 THEME_COLOR = "#233a52"
-ASSET_VERSION = "2026-08-16-invoices-edit"
+ASSET_VERSION = "2026-08-19-mail-crawler"
 MAX_JSON_BYTES = int(os.environ.get("MAX_JSON_BYTES", str(60 * 1024 * 1024)))
+MAX_MAIL_ATTACHMENT_BYTES = int(os.environ.get("MAX_MAIL_ATTACHMENT_BYTES", str(12 * 1024 * 1024)))
 OPENAI_INVOICE_MODEL = os.environ.get("OPENAI_INVOICE_MODEL", "gpt-4.1-mini")
 OPENAI_RESPONSES_URL = os.environ.get("OPENAI_RESPONSES_URL", "https://api.openai.com/v1/responses")
 
@@ -57,6 +65,15 @@ DEFAULT_STORAGE_VALUES = {
     "haendlerListe": [],
     "invoices": [],
     "notifyEmails": [],
+}
+
+PRIVATE_STORAGE_VALUES = {
+    "invoiceMailAccounts": [],
+}
+
+ALL_STORAGE_VALUES = {
+    **DEFAULT_STORAGE_VALUES,
+    **PRIVATE_STORAGE_VALUES,
 }
 
 mimetypes.add_type("text/html; charset=utf-8", ".html")
@@ -112,7 +129,7 @@ def init_db():
             )
             """
         )
-        for key, value in DEFAULT_STORAGE_VALUES.items():
+        for key, value in ALL_STORAGE_VALUES.items():
             con.execute(
                 """
                 INSERT OR IGNORE INTO kv_store (key, value, updated_at)
@@ -159,6 +176,293 @@ def save_storage_value(key, value):
             (key, "set", utc_now()),
         )
     return True
+
+
+def load_private_storage_value(key):
+    if key not in PRIVATE_STORAGE_VALUES:
+        return None
+    with db_connect() as con:
+        row = con.execute("SELECT value FROM kv_store WHERE key = ?", (key,)).fetchone()
+    if not row:
+        return PRIVATE_STORAGE_VALUES.get(key)
+    try:
+        return json.loads(row["value"])
+    except json.JSONDecodeError:
+        return PRIVATE_STORAGE_VALUES.get(key)
+
+
+def save_private_storage_value(key, value):
+    if key not in PRIVATE_STORAGE_VALUES:
+        return False
+    encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    with db_connect() as con:
+        con.execute(
+            """
+            INSERT INTO kv_store (key, value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = excluded.updated_at
+            """,
+            (key, encoded, utc_now()),
+        )
+        con.execute(
+            "INSERT INTO storage_log (key, action, created_at) VALUES (?, ?, ?)",
+            (key, "set-private", utc_now()),
+        )
+    return True
+
+
+def decode_mime_header(value):
+    if not value:
+        return ""
+    try:
+        return str(make_header(decode_header(str(value))))
+    except Exception:
+        return str(value)
+
+
+def safe_int(value, default, minimum=None, maximum=None):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    if minimum is not None:
+        parsed = max(minimum, parsed)
+    if maximum is not None:
+        parsed = min(maximum, parsed)
+    return parsed
+
+
+def make_mail_account_id():
+    return "mail" + datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
+
+
+def load_invoice_mail_accounts():
+    accounts = load_private_storage_value("invoiceMailAccounts")
+    return accounts if isinstance(accounts, list) else []
+
+
+def save_invoice_mail_accounts(accounts):
+    return save_private_storage_value("invoiceMailAccounts", accounts)
+
+
+def public_mail_account(account):
+    return {
+        "id": account.get("id"),
+        "label": account.get("label") or account.get("email") or account.get("username") or "Postfach",
+        "email": account.get("email") or "",
+        "host": account.get("host") or "",
+        "port": account.get("port") or 993,
+        "username": account.get("username") or "",
+        "folder": account.get("folder") or "INBOX",
+        "use_ssl": account.get("use_ssl", True),
+        "days_back": account.get("days_back") or 30,
+        "max_messages": account.get("max_messages") or 25,
+        "password_set": bool(account.get("password")),
+        "last_crawled_at": account.get("last_crawled_at") or "",
+        "last_found_count": account.get("last_found_count") or 0,
+        "last_error": account.get("last_error") or "",
+    }
+
+
+def normalize_mail_account(payload, existing=None):
+    existing = existing or {}
+    use_ssl = bool(payload.get("use_ssl", existing.get("use_ssl", True)))
+    port_default = 993 if use_ssl else 143
+    account = {
+        "id": str(payload.get("id") or existing.get("id") or make_mail_account_id()),
+        "label": str(payload.get("label") or existing.get("label") or "").strip(),
+        "email": str(payload.get("email") or existing.get("email") or "").strip(),
+        "host": str(payload.get("host") or existing.get("host") or "").strip(),
+        "port": safe_int(payload.get("port", existing.get("port", port_default)), port_default, 1, 65535),
+        "username": str(payload.get("username") or existing.get("username") or "").strip(),
+        "password": str(payload.get("password") or existing.get("password") or ""),
+        "folder": str(payload.get("folder") or existing.get("folder") or "INBOX").strip() or "INBOX",
+        "use_ssl": use_ssl,
+        "days_back": safe_int(payload.get("days_back", existing.get("days_back", 30)), 30, 1, 365),
+        "max_messages": safe_int(payload.get("max_messages", existing.get("max_messages", 25)), 25, 1, 100),
+        "last_crawled_at": existing.get("last_crawled_at") or "",
+        "last_found_count": existing.get("last_found_count") or 0,
+        "last_error": existing.get("last_error") or "",
+    }
+    if not account["label"]:
+        account["label"] = account["email"] or account["username"] or "Postfach"
+    errors = []
+    if not account["email"]:
+        errors.append("E-Mail-Adresse fehlt.")
+    if not account["host"]:
+        errors.append("IMAP-Server fehlt.")
+    if not account["username"]:
+        errors.append("Benutzername fehlt.")
+    if not account["password"]:
+        errors.append("Passwort/App-Passwort fehlt.")
+    return account, errors
+
+
+def supported_invoice_attachment(part, filename):
+    content_type = (part.get_content_type() or "").lower()
+    lower_name = (filename or "").lower()
+    if content_type in {"application/pdf", "image/jpeg", "image/png", "image/webp"}:
+        return True
+    return lower_name.endswith((".pdf", ".jpg", ".jpeg", ".png", ".webp"))
+
+
+def attachment_file_from_part(part, filename, uid, index):
+    payload = part.get_payload(decode=True)
+    if not payload:
+        return None, "Leerer Anhang uebersprungen."
+    if len(payload) > MAX_MAIL_ATTACHMENT_BYTES:
+        return None, f"{filename} ist groesser als erlaubt und wurde uebersprungen."
+    content_type = part.get_content_type() or mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    data = base64.b64encode(payload).decode("ascii")
+    return {
+        "name": filename or f"rechnung-{uid.decode('ascii', errors='ignore')}-{index}.pdf",
+        "type": content_type,
+        "size": len(payload),
+        "dataUrl": f"data:{content_type};base64,{data}",
+    }, ""
+
+
+def message_date_iso(msg):
+    raw = msg.get("Date")
+    if not raw:
+        return ""
+    try:
+        parsed = parsedate_to_datetime(raw)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc).isoformat(timespec="seconds")
+    except Exception:
+        return ""
+
+
+def extract_invoice_attachments(msg, uid):
+    files = []
+    skipped = []
+    for index, part in enumerate(msg.iter_attachments(), start=1):
+        filename = decode_mime_header(part.get_filename()) or f"anhang-{index}"
+        if not supported_invoice_attachment(part, filename):
+            skipped.append(f"{filename}: kein PDF/Bild")
+            continue
+        file_info, warning = attachment_file_from_part(part, filename, uid, index)
+        if warning:
+            skipped.append(warning)
+        if file_info:
+            files.append(file_info)
+    return files, skipped
+
+
+def invoice_signature_from_extracted(extracted):
+    supplier = re.sub(r"\s+", " ", str(extracted.get("supplier") or "").strip().lower())
+    number = re.sub(r"\s+", "", str(extracted.get("invoice_number") or "").strip().lower())
+    if supplier and number:
+        return f"{supplier}|{number}"
+    gross = str(extracted.get("gross_amount") or "")
+    date = str(extracted.get("invoice_date") or "")
+    return f"{supplier}|{date}|{gross}" if supplier and (date or gross) else ""
+
+
+def crawl_invoice_mail_account(account, known_signatures=None):
+    if not os.environ.get("OPENAI_API_KEY"):
+        return {
+            "ok": False,
+            "status": 503,
+            "error": "OPENAI_API_KEY ist auf dem Server noch nicht hinterlegt.",
+        }
+    if not account.get("password"):
+        return {"ok": False, "status": 400, "error": "Fuer dieses Postfach ist kein Passwort hinterlegt."}
+
+    known = set(known_signatures or [])
+    invoices = []
+    errors = []
+    skipped_attachments = []
+    checked_messages = 0
+    checked_attachments = 0
+    duplicates = 0
+    mail = None
+
+    try:
+        if account.get("use_ssl", True):
+            mail = imaplib.IMAP4_SSL(account["host"], int(account.get("port") or 993), timeout=30)
+        else:
+            mail = imaplib.IMAP4(account["host"], int(account.get("port") or 143), timeout=30)
+        mail.login(account["username"], account["password"])
+        status, _ = mail.select(account.get("folder") or "INBOX", readonly=True)
+        if status != "OK":
+            return {"ok": False, "status": 502, "error": "Postfachordner konnte nicht geoeffnet werden."}
+
+        since = (datetime.now(timezone.utc) - timedelta(days=safe_int(account.get("days_back"), 30, 1, 365))).strftime("%d-%b-%Y")
+        status, data = mail.uid("SEARCH", None, "SINCE", since)
+        if status != "OK":
+            return {"ok": False, "status": 502, "error": "IMAP-Suche im Postfach fehlgeschlagen."}
+
+        uids = (data[0] or b"").split()
+        uids = uids[-safe_int(account.get("max_messages"), 25, 1, 100):]
+        for uid in reversed(uids):
+            checked_messages += 1
+            status, msg_data = mail.uid("FETCH", uid, "(RFC822)")
+            if status != "OK" or not msg_data:
+                errors.append(f"E-Mail UID {uid.decode('ascii', errors='ignore')} konnte nicht geladen werden.")
+                continue
+            raw = next((part[1] for part in msg_data if isinstance(part, tuple) and part[1]), None)
+            if not raw:
+                continue
+            msg = BytesParser(policy=policy.default).parsebytes(raw)
+            subject = decode_mime_header(msg.get("Subject"))
+            sender = decode_mime_header(msg.get("From"))
+            mail_meta = {
+                "account_id": account.get("id"),
+                "account_label": account.get("label") or account.get("email"),
+                "uid": uid.decode("ascii", errors="ignore"),
+                "subject": subject,
+                "from": sender,
+                "date": message_date_iso(msg),
+            }
+            files, skipped = extract_invoice_attachments(msg, uid)
+            skipped_attachments.extend(skipped)
+            for file_info in files:
+                checked_attachments += 1
+                result = call_openai_invoice_extraction([file_info])
+                if not result.get("ok"):
+                    detail = result.get("detail") or result.get("error") or "KI-Auslesung fehlgeschlagen."
+                    errors.append(f"{file_info.get('name')}: {detail}")
+                    continue
+                extracted = result["invoice"]
+                signature = invoice_signature_from_extracted(extracted)
+                if signature and signature in known:
+                    duplicates += 1
+                    continue
+                if signature:
+                    known.add(signature)
+                invoices.append({
+                    "invoice": extracted,
+                    "files": [file_info],
+                    "mail": mail_meta,
+                    "model": result.get("model"),
+                })
+    except imaplib.IMAP4.error as exc:
+        return {"ok": False, "status": 502, "error": "IMAP-Anmeldung oder Zugriff fehlgeschlagen.", "detail": str(exc)}
+    except Exception as exc:
+        return {"ok": False, "status": 502, "error": "Postfach-Crawling fehlgeschlagen.", "detail": str(exc)}
+    finally:
+        if mail is not None:
+            try:
+                mail.logout()
+            except Exception:
+                pass
+
+    return {
+        "ok": True,
+        "status": 200,
+        "checked_messages": checked_messages,
+        "checked_attachments": checked_attachments,
+        "found_count": len(invoices),
+        "duplicates": duplicates,
+        "skipped_attachments": skipped_attachments[:20],
+        "errors": errors[:20],
+        "invoices": invoices,
+    }
 
 
 INVOICE_SCHEMA = {
@@ -405,6 +709,10 @@ class App(BaseHTTPRequestHandler):
                 send_body=send_body,
             )
 
+        if path == "/api/invoice-mail/accounts":
+            accounts = [public_mail_account(account) for account in load_invoice_mail_accounts()]
+            return self._send_json({"ok": True, "accounts": accounts}, send_body=send_body)
+
         if path.startswith("/api/storage/"):
             key = path.removeprefix("/api/storage/")
             if key not in ALLOWED_STORAGE_KEYS:
@@ -417,6 +725,12 @@ class App(BaseHTTPRequestHandler):
         path = unquote(urlparse(self.path).path)
         if path == "/api/invoices/extract":
             return self._handle_invoice_extract()
+        if path == "/api/invoice-mail/accounts":
+            return self._handle_invoice_mail_account_save()
+        if path == "/api/invoice-mail/accounts/delete":
+            return self._handle_invoice_mail_account_delete()
+        if path == "/api/invoice-mail/crawl":
+            return self._handle_invoice_mail_crawl()
 
         if not path.startswith("/api/storage/"):
             return self._send_text(405, "Method not allowed")
@@ -470,6 +784,68 @@ class App(BaseHTTPRequestHandler):
                 payload["detail"] = result["detail"]
             return self._send_json(payload, status=result.get("status", 502))
         return self._send_json({"ok": True, "invoice": result["invoice"], "model": result["model"]})
+
+    def _handle_invoice_mail_account_save(self):
+        value, error, status = self._read_json_body()
+        if error:
+            return self._send_json(error, status=status)
+        if not isinstance(value, dict):
+            return self._send_json({"error": "invalid json"}, status=400)
+
+        accounts = load_invoice_mail_accounts()
+        account_id = str(value.get("id") or "")
+        existing = next((acc for acc in accounts if acc.get("id") == account_id), None)
+        account, errors = normalize_mail_account(value, existing)
+        if errors:
+            return self._send_json({"error": " ".join(errors)}, status=400)
+
+        if existing:
+            accounts = [account if acc.get("id") == account["id"] else acc for acc in accounts]
+        else:
+            accounts.append(account)
+        save_invoice_mail_accounts(accounts)
+        return self._send_json({"ok": True, "accounts": [public_mail_account(acc) for acc in accounts]})
+
+    def _handle_invoice_mail_account_delete(self):
+        value, error, status = self._read_json_body()
+        if error:
+            return self._send_json(error, status=status)
+        account_id = str(value.get("id") or "") if isinstance(value, dict) else ""
+        if not account_id:
+            return self._send_json({"error": "id missing"}, status=400)
+        accounts = [acc for acc in load_invoice_mail_accounts() if acc.get("id") != account_id]
+        save_invoice_mail_accounts(accounts)
+        return self._send_json({"ok": True, "accounts": [public_mail_account(acc) for acc in accounts]})
+
+    def _handle_invoice_mail_crawl(self):
+        value, error, status = self._read_json_body()
+        if error:
+            return self._send_json(error, status=status)
+        if not isinstance(value, dict):
+            return self._send_json({"error": "invalid json"}, status=400)
+        account_id = str(value.get("account_id") or value.get("accountId") or "")
+        accounts = load_invoice_mail_accounts()
+        account = next((acc for acc in accounts if acc.get("id") == account_id), None)
+        if not account:
+            return self._send_json({"error": "Postfach nicht gefunden."}, status=404)
+
+        known = value.get("known_signatures") or value.get("knownSignatures") or []
+        if not isinstance(known, list):
+            known = []
+        result = crawl_invoice_mail_account(account, known_signatures=known)
+        account["last_crawled_at"] = utc_now()
+        account["last_found_count"] = result.get("found_count", 0) if result.get("ok") else 0
+        account["last_error"] = "" if result.get("ok") else (result.get("error") or "Crawling fehlgeschlagen.")
+        save_invoice_mail_accounts(accounts)
+
+        if not result.get("ok"):
+            payload = {"error": result.get("error") or "Postfach-Crawling fehlgeschlagen."}
+            if result.get("detail"):
+                payload["detail"] = result["detail"]
+            payload["accounts"] = [public_mail_account(acc) for acc in accounts]
+            return self._send_json(payload, status=result.get("status", 502))
+        result["accounts"] = [public_mail_account(acc) for acc in accounts]
+        return self._send_json(result)
 
     def _serve_file(self, file_path, send_body=True, cache=True):
         file_path = Path(file_path).resolve()

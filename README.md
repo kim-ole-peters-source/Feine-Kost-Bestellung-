@@ -32,6 +32,7 @@ serverfähige Projektstruktur überführt. Die Bestellfunktionen bleiben gleich:
 - CSV-Import für Artikel inklusive herunterladbarer Muster-CSV
 - Rechnungen & Controlling mit Rechnungsupload
 - KI-Auslesung von Rechnungen per OpenAI API
+- Rechnungspostfächer per IMAP hinzufügen und nach Rechnungen crawlen
 
 Der wichtigste technische Unterschied:
 
@@ -72,11 +73,34 @@ Optional kann das Modell gewechselt werden:
 OPENAI_INVOICE_MODEL=gpt-4.1-mini python3 app.py
 ```
 
-Beim Hosting auf `inter.opapetersfeinekost.de` muss `OPENAI_API_KEY` im
+Beim Hosting auf `intern.opapetersfeinekost.de` muss `OPENAI_API_KEY` im
 Hosting-/Server-Panel als geheime Umgebungsvariable eingetragen werden. Danach
 kann im Bereich `Backend Geschaeftsfuehrung` unter `Rechnungen & Controlling`
 eine Rechnung hochgeladen und mit `Mit KI auslesen` automatisch vorerfasst
 werden.
+
+## Rechnungspostfaecher crawlen
+
+Im Bereich `Backend Geschaeftsfuehrung` -> `Rechnungen & Controlling` koennen
+IMAP-Postfaecher hinterlegt werden. Pro Postfach werden gespeichert:
+
+- Anzeigename
+- E-Mail-Adresse
+- IMAP-Server und Port
+- Benutzername
+- Passwort oder App-Passwort
+- Ordner, Suchzeitraum und maximale Anzahl Mails pro Lauf
+
+Mit `Postfach durchsuchen` werden PDF- und Bildanhaenge aus den gefundenen
+Mails per OpenAI als Rechnungen ausgelesen. Neue Rechnungen werden danach unten
+in der normalen Rechnungsliste abgelegt, so als waeren sie manuell hochgeladen
+worden. Nach jedem Lauf erscheint ein Popup mit Anzahl, Haendler,
+Rechnungsnummer und Betrag.
+
+Wichtig: Viele Anbieter, zum Beispiel Gmail oder Microsoft 365, erlauben IMAP
+nur mit aktiviertem IMAP-Zugriff und einem App-Passwort. Die Postfachdaten
+werden serverseitig in `bestellsystem.db` gespeichert und nicht als normale
+Browser-Konfiguration ausgeliefert.
 
 ## Mehrere Artikel anlegen
 

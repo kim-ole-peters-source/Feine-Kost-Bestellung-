@@ -517,6 +517,11 @@ let state = {
   invoiceDraft: null,
   editingInvoiceId: null,
   invoiceAiLoading: false,
+  invoiceMailAccounts: [],
+  invoiceMailDraft: null,
+  invoiceMailNotice: null,
+  invoiceMailCrawlingId: null,
+  invoiceCrawlSummary: null,
   pendingInvoiceProduct: null,
 };
 
@@ -566,6 +571,7 @@ async function loadOrders(){
   }catch(e){
     state.invoices = [];
   }
+  await loadInvoiceMailAccounts();
   let seedChanged = false;
   for(const id in ARTIKELDATEN_SEED){
     if(!state.artikeldaten[id]){
@@ -643,6 +649,223 @@ async function saveInvoices(){
     await cloudStorage.set('invoices', JSON.stringify(state.invoices));
   }catch(e){
     console.error('Speichern fehlgeschlagen', e);
+  }
+}
+
+function defaultInvoiceMailDraft(){
+  return {
+    id: "",
+    label: "",
+    email: "",
+    host: "",
+    port: "993",
+    username: "",
+    password: "",
+    folder: "INBOX",
+    use_ssl: true,
+    days_back: "30",
+    max_messages: "25",
+  };
+}
+
+async function loadInvoiceMailAccounts(){
+  try{
+    const res = await fetch('/api/invoice-mail/accounts', { cache:'no-store' });
+    const data = await res.json();
+    state.invoiceMailAccounts = data.accounts || [];
+  }catch(e){
+    state.invoiceMailAccounts = [];
+  }
+}
+
+function readInvoiceMailDraftFromDom(){
+  const existing = state.invoiceMailDraft || defaultInvoiceMailDraft();
+  return {
+    ...existing,
+    label: document.getElementById('mail-label')?.value.trim() || '',
+    email: document.getElementById('mail-email')?.value.trim() || '',
+    host: document.getElementById('mail-host')?.value.trim() || '',
+    port: document.getElementById('mail-port')?.value.trim() || '993',
+    username: document.getElementById('mail-username')?.value.trim() || '',
+    password: document.getElementById('mail-password')?.value || '',
+    folder: document.getElementById('mail-folder')?.value.trim() || 'INBOX',
+    use_ssl: Boolean(document.getElementById('mail-ssl')?.checked),
+    days_back: document.getElementById('mail-days')?.value.trim() || '30',
+    max_messages: document.getElementById('mail-max')?.value.trim() || '25',
+  };
+}
+
+async function saveInvoiceMailAccount(){
+  const draft = readInvoiceMailDraftFromDom();
+  state.invoiceMailDraft = draft;
+  state.invoiceMailNotice = { type:'success', text:'Postfach wird gespeichert.' };
+  render();
+  try{
+    const res = await fetch('/api/invoice-mail/accounts', {
+      method:'POST',
+      headers:{ 'Content-Type':'application/json' },
+      body: JSON.stringify(draft),
+    });
+    const data = await res.json().catch(()=>({}));
+    if(!res.ok || !data.ok) throw new Error(data.error || 'Postfach konnte nicht gespeichert werden.');
+    state.invoiceMailAccounts = data.accounts || [];
+    state.invoiceMailDraft = defaultInvoiceMailDraft();
+    state.invoiceMailNotice = { type:'success', text:'Postfach wurde gespeichert.' };
+  }catch(e){
+    state.invoiceMailNotice = { type:'error', text:e.message || 'Postfach konnte nicht gespeichert werden.' };
+  }
+  render();
+}
+
+async function removeInvoiceMailAccount(accountId){
+  const account = state.invoiceMailAccounts.find(acc => acc.id === accountId);
+  if(!account) return;
+  if(!confirm(`Postfach "${account.label || account.email}" wirklich entfernen?`)) return;
+  try{
+    const res = await fetch('/api/invoice-mail/accounts/delete', {
+      method:'POST',
+      headers:{ 'Content-Type':'application/json' },
+      body: JSON.stringify({ id: accountId }),
+    });
+    const data = await res.json().catch(()=>({}));
+    if(!res.ok || !data.ok) throw new Error(data.error || 'Postfach konnte nicht entfernt werden.');
+    state.invoiceMailAccounts = data.accounts || [];
+    state.invoiceMailNotice = { type:'success', text:'Postfach wurde entfernt.' };
+  }catch(e){
+    state.invoiceMailNotice = { type:'error', text:e.message || 'Postfach konnte nicht entfernt werden.' };
+  }
+  render();
+}
+
+function invoiceSignatureFromParts(supplier, invoiceNumber, invoiceDate, gross){
+  const s = String(supplier || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  const n = String(invoiceNumber || '').trim().toLowerCase().replace(/\s+/g, '');
+  if(s && n) return `${s}|${n}`;
+  return s && (invoiceDate || gross) ? `${s}|${invoiceDate || ''}|${gross || ''}` : '';
+}
+
+function invoiceSignature(invoice){
+  return invoiceSignatureFromParts(invoice?.supplier, invoice?.invoiceNumber, invoice?.invoiceDate, invoice?.gross);
+}
+
+function aiInvoiceSignature(extracted){
+  return invoiceSignatureFromParts(
+    extracted?.supplier,
+    extracted?.invoice_number,
+    normalizeInputDate(extracted?.invoice_date),
+    extracted?.gross_amount
+  );
+}
+
+function buildInvoiceFromAiExtraction(extracted, files, mailMeta){
+  const items = Array.isArray(extracted.items) ? extracted.items : [];
+  const warnings = Array.isArray(extracted.warnings) ? extracted.warnings.filter(Boolean) : [];
+  const confidence = extracted.confidence || {};
+  const confidenceText = Number.isFinite(Number(confidence.overall))
+    ? `KI-Sicherheit: ${Math.round(Number(confidence.overall) * 100)} %.`
+    : 'KI-Sicherheit: bitte prüfen.';
+  const sourceText = mailMeta
+    ? `Quelle: Postfach ${mailMeta.account_label || ''} · ${mailMeta.from || ''} · ${mailMeta.subject || ''}`.trim()
+    : '';
+  return {
+    id: 'inv' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    supplier: extracted.supplier || 'Ohne Lieferant',
+    invoiceNumber: extracted.invoice_number || '',
+    invoiceDate: normalizeInputDate(extracted.invoice_date) || todayInputValue(),
+    dueDate: normalizeInputDate(extracted.due_date),
+    net: Number(extracted.net_amount || 0),
+    tax: Number(extracted.tax_amount || 0),
+    gross: Number(extracted.gross_amount || 0),
+    taxRate: Number(extracted.tax_rate || 0),
+    status: 'offen',
+    note: [sourceText, confidenceText, ...warnings.map(w => `KI-Hinweis: ${w}`)].filter(Boolean).join('\n'),
+    files: Array.isArray(files) ? files : [],
+    source: 'mail-crawler',
+    sourceMail: mailMeta || null,
+    items: items.map(item => ({
+      name: item.name || '',
+      qty: Number(item.quantity || 1) || 1,
+      unit: item.unit || 'Einheiten',
+      net: Number(item.net_amount || 0),
+      taxRate: Number(item.tax_rate || extracted.tax_rate || 0),
+      reviewStatus: 'offen',
+      matchId: null,
+    })).filter(item => item.name),
+  };
+}
+
+function closeInvoiceCrawlSummary(){
+  state.invoiceCrawlSummary = null;
+  render();
+}
+
+async function crawlInvoiceMailAccount(accountId){
+  const account = state.invoiceMailAccounts.find(acc => acc.id === accountId);
+  if(!account) return;
+  state.invoiceMailCrawlingId = accountId;
+  state.invoiceMailNotice = { type:'success', text:`Postfach "${account.label || account.email}" wird nach Rechnungen durchsucht.` };
+  render();
+  try{
+    const known = state.invoices.map(invoiceSignature).filter(Boolean);
+    const res = await fetch('/api/invoice-mail/crawl', {
+      method:'POST',
+      headers:{ 'Content-Type':'application/json' },
+      body: JSON.stringify({ account_id: accountId, known_signatures: known }),
+    });
+    const data = await res.json().catch(()=>({}));
+    if(data.accounts) state.invoiceMailAccounts = data.accounts;
+    if(!res.ok || !data.ok) throw new Error([data.error, data.detail].filter(Boolean).join(' ') || 'Postfach-Crawling fehlgeschlagen.');
+
+    const signatures = new Set(state.invoices.map(invoiceSignature).filter(Boolean));
+    const newInvoices = [];
+    let frontendDuplicates = 0;
+    (data.invoices || []).forEach(entry => {
+      const extracted = entry.invoice || {};
+      const sig = aiInvoiceSignature(extracted);
+      if(sig && signatures.has(sig)){
+        frontendDuplicates++;
+        return;
+      }
+      if(sig) signatures.add(sig);
+      newInvoices.push(buildInvoiceFromAiExtraction(extracted, entry.files || [], entry.mail || null));
+    });
+
+    if(newInvoices.length){
+      state.invoices.unshift(...newInvoices);
+      newInvoices.forEach(inv => {
+        if(inv.supplier && !state.haendlerListe.includes(inv.supplier)) state.haendlerListe.push(inv.supplier);
+      });
+      await saveInvoices();
+      await saveHaendlerListe();
+    }
+
+    const duplicateCount = Number(data.duplicates || 0) + frontendDuplicates;
+    state.invoiceStatusFilter = 'offen';
+    state.invoiceMailNotice = {
+      type:'success',
+      text:`Crawling abgeschlossen: ${newInvoices.length} neue Rechnung(en) gespeichert.`,
+    };
+    state.invoiceCrawlSummary = {
+      account: account.label || account.email,
+      checkedMessages: data.checked_messages || 0,
+      checkedAttachments: data.checked_attachments || 0,
+      found: newInvoices.length,
+      duplicates: duplicateCount,
+      errors: data.errors || [],
+      skipped: data.skipped_attachments || [],
+      invoices: newInvoices.map(inv => ({
+        supplier: inv.supplier,
+        invoiceNumber: inv.invoiceNumber,
+        gross: inv.gross,
+      })),
+    };
+  }catch(e){
+    state.invoiceMailNotice = { type:'error', text:e.message || 'Postfach-Crawling fehlgeschlagen.' };
+  }finally{
+    state.invoiceMailCrawlingId = null;
+    render();
   }
 }
 
@@ -2845,6 +3068,7 @@ function renderEmpfangSeite(){
       ${tabsHtml}
       ${renderInvoicesControlling()}
       ${state.invoiceUploadOpen ? renderInvoiceUploadPopup() : ''}
+      ${state.invoiceCrawlSummary ? renderInvoiceCrawlSummaryPopup() : ''}
       ${state.newItemPopupOpen ? renderNewItemPopup() : ''}
     `;
   }
@@ -2891,6 +3115,100 @@ function renderEmpfangSeite(){
     </div>
     ${tabsHtml}
     ${renderSammlung('freitag', null, false)}
+  `;
+}
+
+function renderInvoiceMailAccounts(){
+  const draft = state.invoiceMailDraft || defaultInvoiceMailDraft();
+  const accounts = state.invoiceMailAccounts || [];
+  const rows = accounts.length === 0
+    ? `<p class="no-results">Noch kein Rechnungspostfach hinterlegt.</p>`
+    : accounts.map(account => {
+      const last = account.last_crawled_at
+        ? new Date(account.last_crawled_at).toLocaleString('de-DE')
+        : 'noch nie';
+      const busy = state.invoiceMailCrawlingId === account.id;
+      return `
+        <div class="invoice-mail-row">
+          <div>
+            <div class="item-name">${escapeHtml(account.label || account.email || 'Postfach')}</div>
+            <div class="item-unit">${escapeHtml(account.email || account.username || '')} · ${escapeHtml(account.host || '')}:${escapeHtml(account.port || '')} · Ordner ${escapeHtml(account.folder || 'INBOX')}</div>
+            <div class="item-unit">Letzter Lauf: ${escapeHtml(last)} · Passwort: ${account.password_set ? 'hinterlegt' : 'fehlt'}</div>
+            ${account.last_error ? `<div class="notice notice-error invoice-card-notice">${escapeHtml(account.last_error)}</div>` : ''}
+          </div>
+          <div class="invoice-mail-actions">
+            <button class="new-item-btn" data-action="crawlinvoicemail" data-id="${account.id}" ${busy ? 'disabled' : ''}>${busy ? 'Durchsuche…' : 'Postfach durchsuchen'}</button>
+            <button class="danger-outline edit-btn" data-action="removeinvoicemail" data-id="${account.id}">Entfernen</button>
+          </div>
+        </div>
+      `;
+    }).join('');
+
+  return `
+    <div class="sammel-card invoice-mail-panel">
+      <div class="sammel-card-head">
+        <div>
+          <p class="group-title">Rechnungspostfächer</p>
+          <div class="item-unit">IMAP-Postfächer speichern und per OpenAI nach PDF-/Bildrechnungen durchsuchen.</div>
+        </div>
+        <span class="sammel-count">${accounts.length} Postfach/er</span>
+      </div>
+      ${state.invoiceMailNotice ? `<div class="notice notice-${state.invoiceMailNotice.type}">${escapeHtml(state.invoiceMailNotice.text)}</div>` : ''}
+      <div class="invoice-mail-form">
+        <input class="field" id="mail-label" type="text" placeholder="Name, z. B. Rechnungen" value="${escapeHtml(draft.label)}" />
+        <input class="field" id="mail-email" type="email" placeholder="mail@firma.de" value="${escapeHtml(draft.email)}" />
+        <input class="field" id="mail-host" type="text" placeholder="IMAP-Server, z. B. imap.gmail.com" value="${escapeHtml(draft.host)}" />
+        <input class="field" id="mail-port" type="number" min="1" max="65535" placeholder="993" value="${escapeHtml(draft.port)}" />
+        <input class="field" id="mail-username" type="text" placeholder="Benutzername" value="${escapeHtml(draft.username)}" />
+        <input class="field" id="mail-password" type="password" placeholder="Passwort/App-Passwort" value="${escapeHtml(draft.password)}" />
+        <input class="field" id="mail-folder" type="text" placeholder="INBOX" value="${escapeHtml(draft.folder)}" />
+        <input class="field" id="mail-days" type="number" min="1" max="365" placeholder="Tage" value="${escapeHtml(draft.days_back)}" />
+        <input class="field" id="mail-max" type="number" min="1" max="100" placeholder="Max. Mails" value="${escapeHtml(draft.max_messages)}" />
+        <label class="invoice-mail-check"><input id="mail-ssl" type="checkbox" ${draft.use_ssl ? 'checked' : ''} /> SSL</label>
+        <button class="new-item-btn" data-action="saveinvoicemail">+ Postfach speichern</button>
+      </div>
+      <div class="invoice-mail-list">${rows}</div>
+    </div>
+  `;
+}
+
+function renderInvoiceCrawlSummaryPopup(){
+  const summary = state.invoiceCrawlSummary || {};
+  const invoiceRows = (summary.invoices || []).length === 0
+    ? `<p class="no-results">Keine neuen Rechnungen gespeichert.</p>`
+    : (summary.invoices || []).map(inv => `
+      <div class="invoice-position-row">
+        <div>
+          <strong>${escapeHtml(inv.supplier || 'Ohne Händler')}</strong>
+          <span>Rechnung ${escapeHtml(inv.invoiceNumber || 'ohne Nummer')}</span>
+        </div>
+        <div class="invoice-position-meta"><span>${formatEuro(inv.gross || 0)}</span></div>
+      </div>
+    `).join('');
+  const problemRows = [...(summary.errors || []), ...(summary.skipped || [])].slice(0, 8);
+  return `
+    <div class="popup-overlay" data-action="closeinvoicecrawlsummary">
+      <div class="popup-box popup-box-wide invoice-popup" onclick="event.stopPropagation()">
+        <h3>Postfach-Crawling abgeschlossen</h3>
+        <div class="invoice-kpi-grid">
+          <div class="sammel-stat"><span class="sammel-stat-num">${summary.found || 0}</span><span class="sammel-stat-label">Neue Rechnungen</span></div>
+          <div class="sammel-stat"><span class="sammel-stat-num">${summary.checkedMessages || 0}</span><span class="sammel-stat-label">Geprüfte Mails</span></div>
+          <div class="sammel-stat"><span class="sammel-stat-num">${summary.checkedAttachments || 0}</span><span class="sammel-stat-label">Anhänge</span></div>
+          <div class="sammel-stat"><span class="sammel-stat-num">${summary.duplicates || 0}</span><span class="sammel-stat-label">Doppelte</span></div>
+        </div>
+        <p class="haendler-intro">Postfach: <strong>${escapeHtml(summary.account || '')}</strong></p>
+        <div class="invoice-position-list">
+          <div class="invoice-position-head"><span>Gefundene Rechnungen</span><span>${summary.found || 0}</span></div>
+          ${invoiceRows}
+        </div>
+        ${problemRows.length ? `
+          <div class="notice notice-error invoice-card-notice">${problemRows.map(escapeHtml).join('<br>')}</div>
+        ` : ''}
+        <div class="popup-actions popup-actions-wrap">
+          <button class="submit-btn" data-action="closeinvoicecrawlsummary">OK</button>
+        </div>
+      </div>
+    </div>
   `;
 }
 
@@ -3028,6 +3346,8 @@ function renderInvoicesControlling(){
         <button class="new-item-btn" data-action="openinvoiceupload">+ Rechnung hochladen</button>
       </div>
     </div>
+
+    ${renderInvoiceMailAccounts()}
 
     <div class="tabs invoice-filter-tabs">
       ${['offen','pruefung','bezahlt','archiviert','alle'].map(status => `
@@ -3669,6 +3989,18 @@ function attachHandlers(){
   });
   document.querySelectorAll('[data-action="extractinvoiceai"]').forEach(el=>{
     el.addEventListener('click', extractInvoiceWithAi);
+  });
+  document.querySelectorAll('[data-action="saveinvoicemail"]').forEach(el=>{
+    el.addEventListener('click', saveInvoiceMailAccount);
+  });
+  document.querySelectorAll('[data-action="removeinvoicemail"]').forEach(el=>{
+    el.addEventListener('click', ()=>removeInvoiceMailAccount(el.dataset.id));
+  });
+  document.querySelectorAll('[data-action="crawlinvoicemail"]').forEach(el=>{
+    el.addEventListener('click', ()=>crawlInvoiceMailAccount(el.dataset.id));
+  });
+  document.querySelectorAll('[data-action="closeinvoicecrawlsummary"]').forEach(el=>{
+    el.addEventListener('click', closeInvoiceCrawlSummary);
   });
   const invFiles = document.getElementById('inv-files');
   if(invFiles) invFiles.addEventListener('change', e=>{ handleInvoiceFiles(e.target.files); invFiles.value = ''; });

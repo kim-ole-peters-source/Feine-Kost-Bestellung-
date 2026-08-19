@@ -81,6 +81,32 @@ Empfohlen:
 - HTTPS aktivieren
 - optional zusätzlichen Passwortschutz am Server setzen
 
+## OpenAI fuer Rechnungen aktivieren
+
+Auf dem Server muss der OpenAI-Schluessel als Umgebungsvariable fuer den
+Dienst gesetzt werden:
+
+```text
+OPENAI_API_KEY=sk-...
+```
+
+Danach den Dienst neu starten.
+
+## Rechnungspostfaecher einrichten
+
+Nach dem Einloggen als Geschäftsführung:
+
+1. `Rechnungen & Controlling` öffnen.
+2. Unter `Rechnungspostfächer` IMAP-Daten eintragen.
+3. `+ Postfach speichern` klicken.
+4. Neben dem Postfach `Postfach durchsuchen` klicken.
+5. Nach dem Crawling das Ergebnis-Popup prüfen.
+
+Gefundene Rechnungen landen automatisch unten in der normalen Rechnungsliste.
+
+Bei Gmail, Outlook oder Microsoft 365 wird oft ein App-Passwort benötigt.
+IMAP muss beim Anbieter freigeschaltet sein.
+
 ## Artikel mehrfach anlegen
 
 Nach dem Einloggen als Geschäftsführung:
