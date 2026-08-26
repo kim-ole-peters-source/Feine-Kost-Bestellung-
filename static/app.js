@@ -523,6 +523,8 @@ let state = {
   invoiceMailCrawlingId: null,
   invoiceCrawlSummary: null,
   pendingInvoiceProduct: null,
+  prodSelectedOrderIds: new Set(),
+  prodSelectionPreviewOpen: false,
 };
 
 async function loadOrders(){
@@ -1667,16 +1669,190 @@ function getSammlung(rhythmus, itemFilterFn, orderFilterFn, offset){
     return d >= start && d <= ende;
   });
 
+  const summen = getSummenFromOrders(orders, itemFilterFn);
+
+  return { start, ende, orders, summen };
+}
+
+function getDisplayItems(order, itemFilterFn){
+  if(!order || !Array.isArray(order.items)) return [];
+  return itemFilterFn ? order.items.filter(itemFilterFn) : order.items;
+}
+
+function getSummenFromOrders(orders, itemFilterFn){
   const summen = {}; // itemId -> {name, unit, qty}
   orders.forEach(o => {
-    const items = itemFilterFn ? o.items.filter(itemFilterFn) : o.items;
+    const items = getDisplayItems(o, itemFilterFn);
     items.forEach(it => {
       if(!summen[it.id]) summen[it.id] = { id: it.id, name: it.name, unit: it.unit, qty: 0 };
       summen[it.id].qty += it.qty;
     });
   });
+  return Object.values(summen);
+}
 
-  return { start, ende, orders, summen: Object.values(summen) };
+function getBemerkungenFromOrders(orders, itemFilterFn){
+  return orders
+    .filter(o => getDisplayItems(o, itemFilterFn).length > 0)
+    .map(o => ({
+      order: o,
+      note: String(o.note || '').trim(),
+      itemCount: getDisplayItems(o, itemFilterFn).length,
+    }))
+    .filter(entry => entry.note.length > 0);
+}
+
+function noteTextToHtml(note){
+  return escapeHtml(note).replace(/\n/g, '<br>');
+}
+
+function renderProduktionsBemerkungen(notes){
+  if(!notes.length) return '';
+  return `
+    <div class="production-notes-panel">
+      <div class="production-notes-head">
+        <strong>Bemerkungen aus den Einzelbestellungen</strong>
+        <span>${notes.length} Hinweis(e)</span>
+      </div>
+      <div class="production-notes-list">
+        ${notes.map(({order, note, itemCount}) => `
+          <div class="production-note-box">
+            <div class="production-note-meta">
+              #${formatOrderNumber(order)} · ${fmtDate(order.date)}
+              ${order.name ? ` · ${escapeHtml(order.name)}` : ''}
+              ${order.dept ? ` · ${escapeHtml(order.dept)}` : ''}
+              · ${itemCount} Position(en)
+            </div>
+            <div class="production-note-text">${noteTextToHtml(note)}</div>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+  `;
+}
+
+function addBemerkungenToPdf(doc, notes, y, options){
+  if(!notes.length) return y;
+  const pageWidth = options?.pageWidth || doc.internal.pageSize.getWidth();
+  const pageHeight = options?.pageHeight || doc.internal.pageSize.getHeight();
+  const marginX = options?.marginX || 16;
+  const contentWidth = pageWidth - marginX*2;
+  const RED = [179, 38, 30];
+  const RED_DARK = [122, 38, 32];
+  const RED_BG = [253, 236, 236];
+  const INK = [33, 31, 26];
+
+  if(y > pageHeight - 45){ doc.addPage(); y = 20; }
+  doc.setFont(undefined, 'bold');
+  doc.setFontSize(11);
+  doc.setTextColor(...RED_DARK);
+  doc.text('BEMERKUNGEN', marginX, y);
+  y += 6;
+
+  notes.forEach(({order, note, itemCount}) => {
+    const meta = [
+      `#${formatOrderNumber(order)}`,
+      fmtDate(order.date),
+      order.name || null,
+      order.dept || null,
+      `${itemCount} Position(en)`,
+    ].filter(Boolean).join(' · ');
+    const metaLines = doc.splitTextToSize(meta, contentWidth - 10);
+    const noteLines = doc.splitTextToSize(note, contentWidth - 10);
+    const boxHeight = metaLines.length * 4.2 + noteLines.length * 5 + 12;
+
+    if(y + boxHeight > pageHeight - 12){
+      doc.addPage();
+      y = 20;
+    }
+    doc.setDrawColor(...RED);
+    doc.setFillColor(...RED_BG);
+    doc.roundedRect(marginX, y, contentWidth, boxHeight, 2, 2, 'FD');
+
+    doc.setFont(undefined, 'bold');
+    doc.setFontSize(8.5);
+    doc.setTextColor(...RED_DARK);
+    doc.text(metaLines, marginX + 5, y + 6.5);
+
+    doc.setFont(undefined, 'normal');
+    doc.setFontSize(9.5);
+    doc.setTextColor(...INK);
+    doc.text(noteLines, marginX + 5, y + 6.5 + metaLines.length * 4.2 + 4);
+
+    y += boxHeight + 4;
+  });
+
+  return y + 4;
+}
+
+function clearProdOrderSelection(){
+  state.prodSelectedOrderIds = new Set();
+  state.prodSelectionPreviewOpen = false;
+}
+
+function toggleProdOrderSelection(orderId){
+  if(state.prodSelectedOrderIds.has(orderId)) state.prodSelectedOrderIds.delete(orderId);
+  else state.prodSelectedOrderIds.add(orderId);
+  render();
+}
+
+function selectProdOrders(idsCsv){
+  String(idsCsv || '').split(',').filter(Boolean).forEach(id => state.prodSelectedOrderIds.add(id));
+  render();
+}
+
+function resetProdOrderSelection(){
+  clearProdOrderSelection();
+  render();
+}
+
+function showProdOrderSelectionPreview(){
+  if(getSelectedProdOrderData().orders.length === 0) return;
+  state.prodSelectionPreviewOpen = true;
+  render();
+}
+
+function closeProdOrderSelectionPreview(){
+  state.prodSelectionPreviewOpen = false;
+  render();
+}
+
+function getSelectedProdOrderData(){
+  const rhythmus = state.prodBackendTab === 'monat' ? 'monat' : 'freitag';
+  const itemFilterFn = it => isProduktionsArtikel(it.id);
+  const { start, ende, orders } = getSammlung(rhythmus, itemFilterFn, null, state.sammlungOffset);
+  const selectedOrders = orders
+    .filter(o => state.prodSelectedOrderIds.has(o.id))
+    .filter(o => getDisplayItems(o, itemFilterFn).length > 0);
+  return {
+    rhythmus,
+    start,
+    ende,
+    orders: selectedOrders,
+    summen: getSummenFromOrders(selectedOrders, itemFilterFn),
+    itemFilterFn,
+  };
+}
+
+function groupSummenByHaendlerKategorie(summen){
+  const groups = {};
+  summen.forEach(s => {
+    const d = state.artikeldaten[s.id] || {};
+    const haendler = d.haendler || 'Ohne Händler zugeordnet';
+    const kat = findItemKategorie(s.id) || 'Sonstiges';
+    groups[haendler] = groups[haendler] || {};
+    groups[haendler][kat] = groups[haendler][kat] || [];
+    groups[haendler][kat].push({...s, ve: d.ve || '—'});
+  });
+  return groups;
+}
+
+function formatOrderNumber(order){
+  return String(parseInt(order.id, 36) % 100000).padStart(5, '0');
+}
+
+function datePartForFilename(date){
+  return fmtDatumKurz(date).replace(/\./g, '');
 }
 
 function fmtDatumKurz(d){
@@ -1704,8 +1880,10 @@ async function downloadSammlungPdf(rhythmus, produktionOnly, bereich, offset){
     return;
   }
   const orderFilterFn = bereich ? (o => o.bereich === bereich) : null;
-  const { start, ende, orders, summen } = getSammlung(rhythmus, produktionOnly ? (it => isProduktionsArtikel(it.id)) : null, orderFilterFn, offset);
+  const itemFilterForPdf = produktionOnly ? (it => isProduktionsArtikel(it.id)) : null;
+  const { start, ende, orders, summen } = getSammlung(rhythmus, itemFilterForPdf, orderFilterFn, offset);
   if(summen.length === 0) return;
+  const bemerkungen = produktionOnly ? getBemerkungenFromOrders(orders, itemFilterForPdf) : [];
 
   const NAVY = [35, 58, 82];
   const NAVY_DARK = [22, 40, 59];
@@ -1740,6 +1918,7 @@ async function downloadSammlungPdf(rhythmus, produktionOnly, bereich, offset){
   doc.setLineWidth(1.2);
   doc.line(marginX, y, pageWidth - marginX, y);
   y += 12;
+  y = addBemerkungenToPdf(doc, bemerkungen, y, { pageWidth, pageHeight: doc.internal.pageSize.getHeight(), marginX });
 
   const groups = {};
   summen.forEach(s => {
@@ -1772,6 +1951,99 @@ async function downloadSammlungPdf(rhythmus, produktionOnly, bereich, offset){
   });
 
   doc.save(`${rhythmus === 'monat' ? 'Monats' : 'Freitags'}-Sammlung_${fmtDatumKurz(start).replace('.','')}-${fmtDatumKurz(ende).replace('.','')}.pdf`);
+}
+
+async function downloadSelectedProdOrdersPdf(){
+  if(!window.jspdf){
+    alert('PDF-Bibliothek konnte nicht geladen werden. Bitte Internetverbindung prüfen und Seite neu laden.');
+    return;
+  }
+  const { start, ende, orders, summen } = getSelectedProdOrderData();
+  if(orders.length === 0 || summen.length === 0) return;
+  const bemerkungen = getBemerkungenFromOrders(orders, it => isProduktionsArtikel(it.id));
+
+  const NAVY = [35, 58, 82];
+  const NAVY_DARK = [22, 40, 59];
+  const INK = [33, 31, 26];
+  const INK_SOFT = [109, 105, 95];
+  const ROW_ALT = [244, 242, 236];
+
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ unit:'mm', format:'a4' });
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const marginX = 16;
+  let y = 20;
+
+  doc.setFont(undefined, 'bold');
+  doc.setFontSize(20);
+  doc.setTextColor(...NAVY_DARK);
+  doc.text('AUSWAHL-SAMMELBESTELLUNG', marginX, y);
+
+  doc.setFont(undefined, 'normal');
+  doc.setFontSize(9);
+  doc.setTextColor(...INK_SOFT);
+  doc.text('ZEITRAUM', pageWidth - marginX - 62, y - 9);
+  doc.text('AUSGEWÄHLTE BESTELLUNGEN', pageWidth - marginX - 62, y - 1);
+  doc.setTextColor(...INK);
+  doc.setFont(undefined, 'bold');
+  doc.text(`${fmtDatumKurz(start)} – ${fmtDatumKurz(ende)}`, pageWidth - marginX, y - 9, { align: 'right' });
+  doc.text(String(orders.length), pageWidth - marginX, y - 1, { align: 'right' });
+
+  y += 6;
+  doc.setDrawColor(...NAVY);
+  doc.setLineWidth(1.2);
+  doc.line(marginX, y, pageWidth - marginX, y);
+  y += 10;
+
+  doc.setFont(undefined, 'bold');
+  doc.setFontSize(10);
+  doc.setTextColor(...NAVY);
+  doc.text('AUSGEWÄHLTE EINZELBESTELLUNGEN', marginX, y);
+  y += 5;
+  doc.setFont(undefined, 'normal');
+  doc.setFontSize(8.5);
+  doc.setTextColor(...INK_SOFT);
+  const selectedInfo = orders
+    .map(o => `#${formatOrderNumber(o)} · ${fmtDate(o.date)} · ${o.status === 'offen' ? 'Offen' : 'Erledigt'}`)
+    .join('   ');
+  const infoLines = doc.splitTextToSize(selectedInfo, pageWidth - marginX*2);
+  doc.text(infoLines, marginX, y);
+  y += infoLines.length * 4.2 + 8;
+  y = addBemerkungenToPdf(doc, bemerkungen, y, { pageWidth, pageHeight: doc.internal.pageSize.getHeight(), marginX });
+
+  const groups = groupSummenByHaendlerKategorie(summen);
+  Object.keys(groups).sort().forEach(haendler => {
+    if(y > 265){ doc.addPage(); y = 20; }
+    doc.setFont(undefined, 'bold');
+    doc.setFontSize(12);
+    doc.setTextColor(...NAVY);
+    doc.text(haendler, marginX, y);
+    y += 4;
+
+    Object.keys(groups[haendler]).sort().forEach(kat => {
+      if(y > 265){ doc.addPage(); y = 20; }
+      doc.setFont(undefined, 'bold');
+      doc.setFontSize(9);
+      doc.setTextColor(...INK_SOFT);
+      doc.text(kat.toUpperCase(), marginX, y);
+      y += 3;
+      doc.autoTable({
+        startY: y,
+        margin: { left: marginX, right: marginX },
+        head: [['MENGE', 'ARTIKEL', 'EINHEIT', 'VE']],
+        body: groups[haendler][kat].sort((a,b)=>a.name.localeCompare(b.name,'de')).map(s => [String(s.qty), s.name, s.unit, s.ve]),
+        theme: 'plain',
+        styles: { fontSize: 9.5, textColor: INK, cellPadding: {top:4,bottom:4,left:3,right:3}, lineColor: [233,228,217], lineWidth: 0.3 },
+        headStyles: { fillColor: NAVY, textColor: [255,255,255], fontStyle: 'bold', halign: 'left' },
+        alternateRowStyles: { fillColor: ROW_ALT },
+        columnStyles: { 0: { cellWidth: 20 } },
+      });
+      y = doc.lastAutoTable.finalY + 8;
+    });
+    y += 4;
+  });
+
+  doc.save(`Auswahl-Sammelbestellung_${datePartForFilename(start)}-${datePartForFilename(ende)}.pdf`);
 }
 
 async function downloadOrderPdf(orderId, produktionOnly){
@@ -1933,6 +2205,7 @@ function setRole(r){
   state.prodBackendTab = 'freitag';
   state.gfTab = 'freitagssammlung';
   state.sammlungOffset = 0;
+  clearProdOrderSelection();
   if(r === 'laden' || r === 'produktion'){
     loadCartFromLocal(r);
   }
@@ -2039,15 +2312,16 @@ function setExpanded(id){ state.expanded = state.expanded === id ? null : id; st
 function setFilter(f){ state.filter = f; render(); }
 function setLadenTab(t){ state.ladenTab = t; state.expanded = null; state.sammlungOffset = 0; render(); }
 function setProduktionTab(t){ state.produktionTab = t; state.expanded = null; state.sammlungOffset = 0; render(); }
-function setProdBackendTab(t){ state.prodBackendTab = t; state.expanded = null; state.sammlungOffset = 0; render(); }
+function setProdBackendTab(t){ state.prodBackendTab = t; state.expanded = null; state.sammlungOffset = 0; clearProdOrderSelection(); render(); }
 function setRhythmusFilter(r){ state.rhythmusFilter = r; state.sammlungOffset = 0; render(); }
 function navigiereSammlung(dir){
   const next = state.sammlungOffset + dir;
   if(next > 0) return; // nicht in die Zukunft navigieren
   state.sammlungOffset = next;
+  if(state.role === 'backend_produktion') clearProdOrderSelection();
   render();
 }
-function sammlungHeute(){ state.sammlungOffset = 0; render(); }
+function sammlungHeute(){ state.sammlungOffset = 0; if(state.role === 'backend_produktion') clearProdOrderSelection(); render(); }
 
 function senderLabel(){
   if(state.role === 'laden') return 'Laden';
@@ -2733,6 +3007,8 @@ function renderHistorie(orders, itemFilterFn, groupMode){
   }
   return filtered.map(o => {
     const displayItems = itemFilterFn ? o.items.filter(itemFilterFn) : o.items;
+    const isSelectableProdOrder = state.role === 'backend_produktion' && state.prodBackendTab === 'freitag' && displayItems.length > 0;
+    const isSelectedProdOrder = state.prodSelectedOrderIds.has(o.id);
 
     let itemsHtml;
     if(groupMode === 'haendler-kategorie'){
@@ -2790,12 +3066,20 @@ function renderHistorie(orders, itemFilterFn, groupMode){
     return `
     <div class="order-card">
       <div class="order-head" data-action="expand" data-id="${o.id}">
-        <div>
-          ${o.name ? `<div class="who">${o.name}</div>` : ''}
-          ${o.dept ? `<div class="dept">${o.dept}</div>` : ''}
-          <span class="bereich-pill ${o.bereich==='Produktion' ? 'b-produktion' : 'b-laden'}">${o.bereich || 'Laden'}</span>
-          ${o.ziel ? `<span class="bereich-pill b-ziel">Ziel: ${o.ziel}</span>` : ''}
-          <span class="status-pill ${o.status==='offen'?'status-offen':'status-erledigt'}">${o.status==='offen'?'Offen':'Erledigt'}</span>
+        <div class="order-head-main">
+          ${isSelectableProdOrder ? `
+            <label class="prod-order-checkbox" onclick="event.stopPropagation()">
+              <input type="checkbox" data-action="toggleprodorderselect" data-id="${o.id}" ${isSelectedProdOrder ? 'checked' : ''} />
+              Auswählen
+            </label>
+          ` : ''}
+          <div>
+            ${o.name ? `<div class="who">${o.name}</div>` : ''}
+            ${o.dept ? `<div class="dept">${o.dept}</div>` : ''}
+            <span class="bereich-pill ${o.bereich==='Produktion' ? 'b-produktion' : 'b-laden'}">${o.bereich || 'Laden'}</span>
+            ${o.ziel ? `<span class="bereich-pill b-ziel">Ziel: ${o.ziel}</span>` : ''}
+            <span class="status-pill ${o.status==='offen'?'status-offen':'status-erledigt'}">${o.status==='offen'?'Offen':'Erledigt'}</span>
+          </div>
         </div>
         <div class="date">${fmtDate(o.date)}</div>
       </div>
@@ -3013,6 +3297,7 @@ function renderEmpfangSeite(){
       </div>
       ${prodTabsHtml}
       ${renderSammlung(rhythmus, it => isProduktionsArtikel(it.id), true)}
+      ${state.prodSelectionPreviewOpen ? renderProdOrderSelectionPreview() : ''}
     `;
   }
 
@@ -3521,6 +3806,63 @@ function renderArtikelstammdaten(){
   `;
 }
 
+function renderProdOrderSelectionPreview(){
+  const { start, ende, orders, summen } = getSelectedProdOrderData();
+  const groups = groupSummenByHaendlerKategorie(summen);
+  const bemerkungen = getBemerkungenFromOrders(orders, it => isProduktionsArtikel(it.id));
+  const selectedOrdersHtml = orders.map(o => `
+    <div class="sammel-item-line">
+      <span class="sammel-item-name">#${formatOrderNumber(o)} · ${fmtDate(o.date)}</span>
+      <span class="sammel-qty-chip">${getDisplayItems(o, it => isProduktionsArtikel(it.id)).length} Position(en)</span>
+    </div>
+  `).join('');
+  const groupsHtml = Object.keys(groups).sort().map(haendler => `
+    <div class="sammel-card">
+      <div class="sammel-card-head">
+        <p class="group-title">${escapeHtml(haendler)}</p>
+        <span class="sammel-count">${Object.values(groups[haendler]).reduce((sum, arr) => sum + arr.length, 0)} Artikel</span>
+      </div>
+      ${Object.keys(groups[haendler]).sort().map(kat => `
+        <div class="kategorie-group">
+          <p class="subgroup-title">${escapeHtml(kat)}</p>
+          ${groups[haendler][kat].sort((a,b)=>a.name.localeCompare(b.name,'de')).map(s => `
+            <div class="sammel-item-line">
+              <span class="sammel-item-name">${escapeHtml(s.name)}</span>
+              <span class="sammel-item-meta">VE: ${escapeHtml(s.ve)}</span>
+              <span class="sammel-qty-chip">${s.qty}× ${escapeHtml(s.unit)}</span>
+            </div>
+          `).join('')}
+        </div>
+      `).join('')}
+    </div>
+  `).join('');
+
+  return `
+    <div class="popup-overlay" data-action="closeprodselectionpreview">
+      <div class="popup-box popup-box-wide prod-selection-popup" onclick="event.stopPropagation()">
+        <h3>Gesammelte Bestellung aus Auswahl</h3>
+        <p class="haendler-intro">
+          Zeitraum: <strong>${fmtDatumKurz(start)} – ${fmtDatumKurz(ende)}</strong> ·
+          ${orders.length} ausgewählte Einzelbestellung(en) · A4-Druck
+        </p>
+        <div class="sammel-card">
+          <div class="sammel-card-head">
+            <p class="group-title">Ausgewählte Einzelbestellungen</p>
+            <span class="sammel-count">${orders.length}</span>
+          </div>
+          ${selectedOrdersHtml}
+        </div>
+        ${renderProduktionsBemerkungen(bemerkungen)}
+        ${groupsHtml || `<p class="no-results">Keine Artikel in der Auswahl.</p>`}
+        <div class="popup-actions popup-actions-wrap">
+          <button class="popup-cancel" data-action="closeprodselectionpreview">Schließen</button>
+          <button class="submit-btn" data-action="downloadprodselectionpdf">A4-PDF drucken</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
 function renderSammlung(rhythmus, itemFilterFn, produktionOnly, orderFilterFn, bereichFuerPdf){
   const offset = state.sammlungOffset;
   const { start, ende, orders, summen } = getSammlung(rhythmus, itemFilterFn, orderFilterFn, offset);
@@ -3559,6 +3901,9 @@ function renderSammlung(rhythmus, itemFilterFn, produktionOnly, orderFilterFn, b
 
   const haendlerNamen = Object.keys(groups).sort();
   const gesamtArtikel = summen.length;
+  const bemerkungenHtml = (state.role === 'backend_produktion' && produktionOnly)
+    ? renderProduktionsBemerkungen(getBemerkungenFromOrders(orders, itemFilterFn))
+    : '';
 
   const groupsHtml = haendlerNamen.map(haendler => {
     const artikelAnzahl = Object.values(groups[haendler]).reduce((sum, arr) => sum + arr.length, 0);
@@ -3586,11 +3931,37 @@ function renderSammlung(rhythmus, itemFilterFn, produktionOnly, orderFilterFn, b
   const zeigeEinzelbestellungen = state.role === 'laden' || state.role === 'backend_produktion';
   const offeneIds = orders.filter(o=>o.status==='offen').map(o=>o.id).join(',');
   const zeigeAlleErledigtBtn = state.role === 'backend_produktion' && offeneIds.length > 0;
+  const zeigeAuswahlWerkzeuge = state.role === 'backend_produktion' && rhythmus === 'freitag';
+  const sichtbareAuswahlOrders = zeigeAuswahlWerkzeuge
+    ? orders.filter(o => {
+        if(state.filter !== 'alle' && o.status !== state.filter) return false;
+        return getDisplayItems(o, itemFilterFn).length > 0;
+      })
+    : [];
+  const sichtbareAuswahlIds = sichtbareAuswahlOrders.map(o=>o.id).join(',');
+  const ausgewaehltInSammlung = zeigeAuswahlWerkzeuge
+    ? orders.filter(o => state.prodSelectedOrderIds.has(o.id) && getDisplayItems(o, itemFilterFn).length > 0)
+    : [];
+  const auswahlWerkzeugeHtml = zeigeAuswahlWerkzeuge ? `
+    <div class="prod-selection-bar">
+      <div>
+        <strong>${ausgewaehltInSammlung.length}</strong> Einzelbestellung(en) ausgewählt
+        <span>${sichtbareAuswahlOrders.length} in dieser Ansicht sichtbar</span>
+      </div>
+      <div class="prod-selection-actions">
+        <button class="edit-btn" data-action="selectvisibleprodorders" data-ids="${sichtbareAuswahlIds}" ${sichtbareAuswahlOrders.length === 0 ? 'disabled' : ''}>Sichtbare auswählen</button>
+        <button class="edit-btn" data-action="clearprodorderselection" ${ausgewaehltInSammlung.length === 0 ? 'disabled' : ''}>Auswahl zurücksetzen</button>
+        <button class="new-item-btn" data-action="showprodselection" ${ausgewaehltInSammlung.length === 0 ? 'disabled' : ''}>Auswahl anzeigen</button>
+        <button class="new-item-btn" data-action="downloadprodselectionpdf" ${ausgewaehltInSammlung.length === 0 ? 'disabled' : ''}>A4-PDF drucken</button>
+      </div>
+    </div>
+  ` : '';
   const einzelbestellungenHtml = zeigeEinzelbestellungen ? `
     <div class="sammel-einzel-trenner">
       <p class="haendler-intro" style="margin-bottom:14px;">
         💬 Einzelne Bestellungen in diesem Zeitraum – hier könnt ihr den Status setzen und zu einer bestimmten Bestellung chatten.
       </p>
+      ${auswahlWerkzeugeHtml}
       ${zeigeAlleErledigtBtn ? `<div class="order-actions" style="margin-bottom:14px;"><button class="btn-complete" data-action="markallerledigt" data-ids="${offeneIds}">✓ Alle offenen Bestellungen dieser Sammlung als erledigt markieren</button></div>` : ''}
       <div class="tabs">
         <button class="tab ${state.filter==='offen'?'active':''}" data-action="filter" data-filter="offen">Offen</button>
@@ -3612,6 +3983,7 @@ function renderSammlung(rhythmus, itemFilterFn, produktionOnly, orderFilterFn, b
       Zeitraum: <strong>${zeitraum}</strong> (${zeitraumLabel}) ${istAbgeschlossen ? '· <strong>abgeschlossen</strong>' : '· läuft noch, es können bis Ende des Zeitraums weitere Bestellungen dazukommen'}
     </p>
     <button class="new-item-btn" data-action="downloadsammlungpdf"${pdfAttr} style="margin-bottom:18px;">📄 Sammlung als PDF</button>
+    ${bemerkungenHtml}
     ${groupsHtml}
     ${einzelbestellungenHtml}
   `;
@@ -4203,6 +4575,25 @@ function attachHandlers(){
   if(editOrderNote) editOrderNote.addEventListener('input', e=>{ if(state.editingOrderDraft) state.editingOrderDraft.note = e.target.value; });
   document.querySelectorAll('[data-action="downloadsammlungpdf"]').forEach(el=>{
     el.addEventListener('click', ()=>downloadSammlungPdf(el.dataset.rhythmus, el.dataset.produktiononly === '1', el.dataset.bereich || null, parseInt(el.dataset.offset || '0', 10)));
+  });
+  document.querySelectorAll('[data-action="toggleprodorderselect"]').forEach(el=>{
+    el.addEventListener('click', e=>e.stopPropagation());
+    el.addEventListener('change', e=>{ e.stopPropagation(); toggleProdOrderSelection(el.dataset.id); });
+  });
+  document.querySelectorAll('[data-action="selectvisibleprodorders"]').forEach(el=>{
+    el.addEventListener('click', ()=>selectProdOrders(el.dataset.ids));
+  });
+  document.querySelectorAll('[data-action="clearprodorderselection"]').forEach(el=>{
+    el.addEventListener('click', resetProdOrderSelection);
+  });
+  document.querySelectorAll('[data-action="showprodselection"]').forEach(el=>{
+    el.addEventListener('click', showProdOrderSelectionPreview);
+  });
+  document.querySelectorAll('[data-action="closeprodselectionpreview"]').forEach(el=>{
+    el.addEventListener('click', closeProdOrderSelectionPreview);
+  });
+  document.querySelectorAll('[data-action="downloadprodselectionpdf"]').forEach(el=>{
+    el.addEventListener('click', downloadSelectedProdOrdersPdf);
   });
   document.querySelectorAll('[data-action="sammlungnav"]').forEach(el=>{
     el.addEventListener('click', ()=>navigiereSammlung(parseInt(el.dataset.dir, 10)));

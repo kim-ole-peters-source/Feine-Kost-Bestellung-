@@ -127,6 +127,22 @@ Erlaubte Werte:
 - `bereich`: `Laden` oder `Produktion`
 - `rhythmus`: `beide`, `freitag` oder `monat`
 
+## Produktions-Wochenauswahl drucken
+
+Nach dem Einloggen als Backend Produktion:
+
+1. `Freitags-Sammlung` öffnen.
+2. In der Liste unten die gewünschten Einzelbestellungen anhaken.
+3. Optional `Sichtbare auswählen` nutzen, wenn alle sichtbaren Bestellungen in
+   die Sammlung sollen.
+4. `Auswahl anzeigen` klicken, um die gesammelte Bestellung zu prüfen.
+5. `A4-PDF drucken` klicken, um die ausgewählten Bestellungen als A4-PDF zu
+   erstellen.
+
+Bemerkungen aus dem Textfeld einer Bestellung werden im Backend Produktion
+direkt unter `Sammlung als PDF` als rote Hinweisbox angezeigt und automatisch
+mit in die druckbare A4-PDF übernommen.
+
 ## Vercel optional
 
 Die Struktur enthält wie beim Opa-Peters-System:

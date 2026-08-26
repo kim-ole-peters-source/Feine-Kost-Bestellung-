@@ -33,6 +33,10 @@ serverfähige Projektstruktur überführt. Die Bestellfunktionen bleiben gleich:
 - Rechnungen & Controlling mit Rechnungsupload
 - KI-Auslesung von Rechnungen per OpenAI API
 - Rechnungspostfächer per IMAP hinzufügen und nach Rechnungen crawlen
+- Backend Produktion: mehrere Einzelbestellungen aus einer Woche auswählen,
+  als Sammelbestellung anzeigen und als A4-PDF drucken
+- Backend Produktion: Bemerkungen aus Bestellungen werden in der digitalen
+  Sammlung und in der A4-PDF automatisch als rote Hinweisboxen angezeigt
 
 Der wichtigste technische Unterschied:
 
@@ -119,6 +123,21 @@ artikelname;kategorie;bereich;einheit;ve;haendler;rhythmus
 
 `bereich` kann `Laden` oder `Produktion` sein. `rhythmus` kann `beide`,
 `freitag` oder `monat` sein.
+
+## Produktions-Wochenauswahl drucken
+
+Im `Backend Produktion` unter `Freitags-Sammlung` können einzelne
+Wochenbestellungen per Checkbox ausgewählt werden. Danach stehen oberhalb der
+Liste diese Aktionen bereit:
+
+- `Sichtbare auswählen` - alle gerade sichtbaren Einzelbestellungen übernehmen
+- `Auswahl anzeigen` - gesammelte Bestellung direkt im Browser prüfen
+- `A4-PDF drucken` - ausgewählte Bestellungen als A4-Sammelbestellung ausgeben
+
+Die Monats-Sammlung bleibt unverändert.
+
+Bemerkungen aus dem Textfeld einer Bestellung erscheinen automatisch direkt
+unter dem Button `Sammlung als PDF` und werden auch in die A4-PDF übernommen.
 
 ## GitHub hochladen
 

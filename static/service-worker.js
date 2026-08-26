@@ -1,4 +1,4 @@
-const CACHE_NAME = 'gebrueder-pesch-bestellung-v7-mail-crawler';
+const CACHE_NAME = 'gebrueder-pesch-bestellung-v9-prod-notes-a4';
 const STATIC_ASSETS = [
   '/',
   '/static/index.html',
