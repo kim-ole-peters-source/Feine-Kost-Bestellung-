@@ -1674,6 +1674,44 @@ function getSammlung(rhythmus, itemFilterFn, orderFilterFn, offset){
   return { start, ende, orders, summen };
 }
 
+function hasOrderNote(order){
+  return String(order?.note || '').trim().length > 0;
+}
+
+function isProductionRelevantOrder(order, itemFilterFn){
+  return getDisplayItems(order, itemFilterFn).length > 0 || hasOrderNote(order);
+}
+
+function getProductionRelevantOrders(orders, itemFilterFn){
+  return orders.filter(o => isProductionRelevantOrder(o, itemFilterFn));
+}
+
+function getOrderItemCountLabel(order, itemFilterFn){
+  const count = getDisplayItems(order, itemFilterFn).length;
+  return count > 0 ? `${count} Position(en)` : 'Nur Bemerkung';
+}
+
+function getAlreadyOrderedSummen(rhythmus, bereich){
+  const { start, ende } = getSammelZeitraum(rhythmus, 0);
+  let markerStart = start;
+  if(rhythmus === 'freitag'){
+    const now = new Date();
+    const monday = new Date(now);
+    const diffToMonday = (now.getDay() + 6) % 7;
+    monday.setDate(now.getDate() - diffToMonday);
+    monday.setHours(0,0,0,0);
+    if(monday > markerStart) markerStart = monday;
+  }
+  const orders = state.orders.filter(o => {
+    if(o.rhythmus !== rhythmus) return false;
+    if(o.bereich !== bereich) return false;
+    if(o.status === 'erledigt') return false;
+    const d = new Date(o.date);
+    return d >= markerStart && d <= ende;
+  });
+  return getSummenFromOrders(orders, null);
+}
+
 function getDisplayItems(order, itemFilterFn){
   if(!order || !Array.isArray(order.items)) return [];
   return itemFilterFn ? order.items.filter(itemFilterFn) : order.items;
@@ -1691,15 +1729,14 @@ function getSummenFromOrders(orders, itemFilterFn){
   return Object.values(summen);
 }
 
-function getBemerkungenFromOrders(orders, itemFilterFn){
+function getBemerkungenFromOrders(orders, itemFilterFn, includeNoteOnly){
   return orders
-    .filter(o => getDisplayItems(o, itemFilterFn).length > 0)
     .map(o => ({
       order: o,
       note: String(o.note || '').trim(),
       itemCount: getDisplayItems(o, itemFilterFn).length,
     }))
-    .filter(entry => entry.note.length > 0);
+    .filter(entry => entry.note.length > 0 && (includeNoteOnly || entry.itemCount > 0));
 }
 
 function noteTextToHtml(note){
@@ -1711,17 +1748,18 @@ function renderProduktionsBemerkungen(notes){
   return `
     <div class="production-notes-panel">
       <div class="production-notes-head">
-        <strong>Bemerkungen aus den Einzelbestellungen</strong>
+        <strong>Wichtige Bemerkungen aus den Einzelbestellungen</strong>
         <span>${notes.length} Hinweis(e)</span>
       </div>
       <div class="production-notes-list">
         ${notes.map(({order, note, itemCount}) => `
           <div class="production-note-box">
             <div class="production-note-meta">
+              <span class="production-note-alert">Wichtig</span>
               #${formatOrderNumber(order)} · ${fmtDate(order.date)}
               ${order.name ? ` · ${escapeHtml(order.name)}` : ''}
               ${order.dept ? ` · ${escapeHtml(order.dept)}` : ''}
-              · ${itemCount} Position(en)
+              · ${itemCount > 0 ? `${itemCount} Position(en)` : 'Nur Bemerkung'}
             </div>
             <div class="production-note-text">${noteTextToHtml(note)}</div>
           </div>
@@ -1755,7 +1793,7 @@ function addBemerkungenToPdf(doc, notes, y, options){
       fmtDate(order.date),
       order.name || null,
       order.dept || null,
-      `${itemCount} Position(en)`,
+      itemCount > 0 ? `${itemCount} Position(en)` : 'Nur Bemerkung',
     ].filter(Boolean).join(' · ');
     const metaLines = doc.splitTextToSize(meta, contentWidth - 10);
     const noteLines = doc.splitTextToSize(note, contentWidth - 10);
@@ -1823,7 +1861,7 @@ function getSelectedProdOrderData(){
   const { start, ende, orders } = getSammlung(rhythmus, itemFilterFn, null, state.sammlungOffset);
   const selectedOrders = orders
     .filter(o => state.prodSelectedOrderIds.has(o.id))
-    .filter(o => getDisplayItems(o, itemFilterFn).length > 0);
+    .filter(o => isProductionRelevantOrder(o, itemFilterFn));
   return {
     rhythmus,
     start,
@@ -1882,8 +1920,9 @@ async function downloadSammlungPdf(rhythmus, produktionOnly, bereich, offset){
   const orderFilterFn = bereich ? (o => o.bereich === bereich) : null;
   const itemFilterForPdf = produktionOnly ? (it => isProduktionsArtikel(it.id)) : null;
   const { start, ende, orders, summen } = getSammlung(rhythmus, itemFilterForPdf, orderFilterFn, offset);
-  if(summen.length === 0) return;
-  const bemerkungen = produktionOnly ? getBemerkungenFromOrders(orders, itemFilterForPdf) : [];
+  const pdfOrders = produktionOnly ? getProductionRelevantOrders(orders, itemFilterForPdf) : orders;
+  const bemerkungen = produktionOnly ? getBemerkungenFromOrders(pdfOrders, itemFilterForPdf, true) : [];
+  if(summen.length === 0 && bemerkungen.length === 0) return;
 
   const NAVY = [35, 58, 82];
   const NAVY_DARK = [22, 40, 59];
@@ -1911,7 +1950,7 @@ async function downloadSammlungPdf(rhythmus, produktionOnly, bereich, offset){
   doc.setTextColor(...INK);
   doc.setFont(undefined, 'bold');
   doc.text(`${fmtDatumKurz(start)} – ${fmtDatumKurz(ende)}`, pageWidth - marginX, y - 9, { align: 'right' });
-  doc.text(String(orders.length), pageWidth - marginX, y - 1, { align: 'right' });
+  doc.text(String(pdfOrders.length), pageWidth - marginX, y - 1, { align: 'right' });
 
   y += 6;
   doc.setDrawColor(...NAVY);
@@ -1959,8 +1998,8 @@ async function downloadSelectedProdOrdersPdf(){
     return;
   }
   const { start, ende, orders, summen } = getSelectedProdOrderData();
-  if(orders.length === 0 || summen.length === 0) return;
-  const bemerkungen = getBemerkungenFromOrders(orders, it => isProduktionsArtikel(it.id));
+  const bemerkungen = getBemerkungenFromOrders(orders, it => isProduktionsArtikel(it.id), true);
+  if(orders.length === 0 || (summen.length === 0 && bemerkungen.length === 0)) return;
 
   const NAVY = [35, 58, 82];
   const NAVY_DARK = [22, 40, 59];
@@ -2880,7 +2919,7 @@ function renderNeu(catalog){
 
   const bereich = state.role === 'produktion' ? 'Produktion' : 'Laden';
   const bereitsBestelltMap = {};
-  getSammlung(state.rhythmusFilter, null, o => o.bereich === bereich).summen.forEach(s => {
+  getAlreadyOrderedSummen(state.rhythmusFilter, bereich).forEach(s => {
     bereitsBestelltMap[s.id] = s.qty;
   });
 
@@ -2907,7 +2946,7 @@ function renderNeu(catalog){
           return `
           <div class="item-row ${bereitsQty ? 'item-row-warnung' : ''}">
             <div>
-              ${bereitsQty ? `<div class="bereits-bestellt-banner">⚠️ Bereits ${bereitsQty}× ${it.unit} in diesem Zeitraum bestellt!</div>` : ''}
+              ${bereitsQty ? `<div class="bereits-bestellt-banner">Bereits ${bereitsQty}× ${it.unit} offen bestellt</div>` : ''}
               <div class="item-name">${it.name}</div>
               <div class="item-unit">${it.unit}${extra}</div>
             </div>
@@ -3007,7 +3046,7 @@ function renderHistorie(orders, itemFilterFn, groupMode){
   }
   return filtered.map(o => {
     const displayItems = itemFilterFn ? o.items.filter(itemFilterFn) : o.items;
-    const isSelectableProdOrder = state.role === 'backend_produktion' && state.prodBackendTab === 'freitag' && displayItems.length > 0;
+    const isSelectableProdOrder = state.role === 'backend_produktion' && state.prodBackendTab === 'freitag' && isProductionRelevantOrder(o, itemFilterFn);
     const isSelectedProdOrder = state.prodSelectedOrderIds.has(o.id);
 
     let itemsHtml;
@@ -3809,11 +3848,12 @@ function renderArtikelstammdaten(){
 function renderProdOrderSelectionPreview(){
   const { start, ende, orders, summen } = getSelectedProdOrderData();
   const groups = groupSummenByHaendlerKategorie(summen);
-  const bemerkungen = getBemerkungenFromOrders(orders, it => isProduktionsArtikel(it.id));
+  const itemFilterFn = it => isProduktionsArtikel(it.id);
+  const bemerkungen = getBemerkungenFromOrders(orders, itemFilterFn, true);
   const selectedOrdersHtml = orders.map(o => `
     <div class="sammel-item-line">
       <span class="sammel-item-name">#${formatOrderNumber(o)} · ${fmtDate(o.date)}</span>
-      <span class="sammel-qty-chip">${getDisplayItems(o, it => isProduktionsArtikel(it.id)).length} Position(en)</span>
+      <span class="sammel-qty-chip">${getOrderItemCountLabel(o, itemFilterFn)}</span>
     </div>
   `).join('');
   const groupsHtml = Object.keys(groups).sort().map(haendler => `
@@ -3866,6 +3906,8 @@ function renderProdOrderSelectionPreview(){
 function renderSammlung(rhythmus, itemFilterFn, produktionOnly, orderFilterFn, bereichFuerPdf){
   const offset = state.sammlungOffset;
   const { start, ende, orders, summen } = getSammlung(rhythmus, itemFilterFn, orderFilterFn, offset);
+  const displayOrders = produktionOnly ? getProductionRelevantOrders(orders, itemFilterFn) : orders;
+  const bemerkungen = produktionOnly ? getBemerkungenFromOrders(displayOrders, itemFilterFn, true) : [];
   const zeitraum = `${fmtDatumKurz(start)} – ${fmtDatumKurz(ende)}`;
   const istAbgeschlossen = new Date() > ende;
   const pdfAttr = `${produktionOnly ? ' data-produktiononly="1"' : ''} data-rhythmus="${rhythmus}" data-offset="${offset}"${bereichFuerPdf ? ` data-bereich="${bereichFuerPdf}"` : ''}`;
@@ -3881,7 +3923,7 @@ function renderSammlung(rhythmus, itemFilterFn, produktionOnly, orderFilterFn, b
     </div>
   `;
 
-  if(summen.length === 0){
+  if(summen.length === 0 && bemerkungen.length === 0){
     return `
       ${navHtml}
       <p class="haendler-intro">Zeitraum: ${zeitraum} (${zeitraumLabel}) ${istAbgeschlossen ? '· abgeschlossen' : '· läuft noch'}</p>
@@ -3902,7 +3944,7 @@ function renderSammlung(rhythmus, itemFilterFn, produktionOnly, orderFilterFn, b
   const haendlerNamen = Object.keys(groups).sort();
   const gesamtArtikel = summen.length;
   const bemerkungenHtml = (state.role === 'backend_produktion' && produktionOnly)
-    ? renderProduktionsBemerkungen(getBemerkungenFromOrders(orders, itemFilterFn))
+    ? renderProduktionsBemerkungen(bemerkungen)
     : '';
 
   const groupsHtml = haendlerNamen.map(haendler => {
@@ -3929,18 +3971,18 @@ function renderSammlung(rhythmus, itemFilterFn, produktionOnly, orderFilterFn, b
   `;}).join('');
 
   const zeigeEinzelbestellungen = state.role === 'laden' || state.role === 'backend_produktion';
-  const offeneIds = orders.filter(o=>o.status==='offen').map(o=>o.id).join(',');
+  const offeneIds = displayOrders.filter(o=>o.status==='offen').map(o=>o.id).join(',');
   const zeigeAlleErledigtBtn = state.role === 'backend_produktion' && offeneIds.length > 0;
   const zeigeAuswahlWerkzeuge = state.role === 'backend_produktion' && rhythmus === 'freitag';
   const sichtbareAuswahlOrders = zeigeAuswahlWerkzeuge
-    ? orders.filter(o => {
+    ? displayOrders.filter(o => {
         if(state.filter !== 'alle' && o.status !== state.filter) return false;
-        return getDisplayItems(o, itemFilterFn).length > 0;
+        return isProductionRelevantOrder(o, itemFilterFn);
       })
     : [];
   const sichtbareAuswahlIds = sichtbareAuswahlOrders.map(o=>o.id).join(',');
   const ausgewaehltInSammlung = zeigeAuswahlWerkzeuge
-    ? orders.filter(o => state.prodSelectedOrderIds.has(o.id) && getDisplayItems(o, itemFilterFn).length > 0)
+    ? displayOrders.filter(o => state.prodSelectedOrderIds.has(o.id) && isProductionRelevantOrder(o, itemFilterFn))
     : [];
   const auswahlWerkzeugeHtml = zeigeAuswahlWerkzeuge ? `
     <div class="prod-selection-bar">
@@ -3968,14 +4010,14 @@ function renderSammlung(rhythmus, itemFilterFn, produktionOnly, orderFilterFn, b
         <button class="tab ${state.filter==='erledigt'?'active':''}" data-action="filter" data-filter="erledigt">Erledigt</button>
         <button class="tab ${state.filter==='alle'?'active':''}" data-action="filter" data-filter="alle">Alle</button>
       </div>
-      ${renderHistorie(orders, itemFilterFn, 'kategorie')}
+      ${renderHistorie(displayOrders, itemFilterFn, 'kategorie')}
     </div>
   ` : '';
 
   return `
     ${navHtml}
     <div class="sammel-stats">
-      <div class="sammel-stat"><span class="sammel-stat-num">${orders.length}</span><span class="sammel-stat-label">Bestellung(en)</span></div>
+      <div class="sammel-stat"><span class="sammel-stat-num">${displayOrders.length}</span><span class="sammel-stat-label">Bestellung(en)</span></div>
       <div class="sammel-stat"><span class="sammel-stat-num">${gesamtArtikel}</span><span class="sammel-stat-label">Artikel-Positionen</span></div>
       <div class="sammel-stat"><span class="sammel-stat-num">${haendlerNamen.length}</span><span class="sammel-stat-label">Händler</span></div>
     </div>

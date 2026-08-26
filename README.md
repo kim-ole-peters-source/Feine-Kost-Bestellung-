@@ -37,6 +37,8 @@ serverfähige Projektstruktur überführt. Die Bestellfunktionen bleiben gleich:
   als Sammelbestellung anzeigen und als A4-PDF drucken
 - Backend Produktion: Bemerkungen aus Bestellungen werden in der digitalen
   Sammlung und in der A4-PDF automatisch als rote Hinweisboxen angezeigt
+- Bestellbereich Laden/Produktion: `Bereits bestellt` markiert nur noch offene
+  Bestellungen und setzt sich bei Freitagsbestellungen montags automatisch zurück
 
 Der wichtigste technische Unterschied:
 
@@ -138,6 +140,19 @@ Die Monats-Sammlung bleibt unverändert.
 
 Bemerkungen aus dem Textfeld einer Bestellung erscheinen automatisch direkt
 unter dem Button `Sammlung als PDF` und werden auch in die A4-PDF übernommen.
+Das gilt auch, wenn die Bestellung keine direkten Produktionsartikel enthält
+und nur aus einer Bemerkung besteht.
+
+## Bereits-bestellt-Markierung
+
+Im Bestellbereich Laden und Produktion wird ein Artikel nur noch als
+`offen bestellt` markiert, solange eine passende Bestellung noch nicht als
+erledigt gesetzt wurde. Sobald die Bestellung im Backend erledigt ist,
+verschwindet die Markierung automatisch.
+
+Bei Freitagsbestellungen setzt sich die Markierung zusätzlich jeden Montag
+zurück. Dadurch blockiert eine offene Bestellung aus der Vorwoche die neue
+Woche nicht mehr.
 
 ## GitHub hochladen
 

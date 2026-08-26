@@ -141,7 +141,16 @@ Nach dem Einloggen als Backend Produktion:
 
 Bemerkungen aus dem Textfeld einer Bestellung werden im Backend Produktion
 direkt unter `Sammlung als PDF` als rote Hinweisbox angezeigt und automatisch
-mit in die druckbare A4-PDF übernommen.
+mit in die druckbare A4-PDF übernommen. Das gilt auch für Bestellungen, die
+keine direkten Produktionsartikel enthalten und nur eine Bemerkung haben.
+
+## Bereits-bestellt-Markierung
+
+Im Bestellbereich Laden/Produktion werden Artikel nur als `offen bestellt`
+markiert, solange die zugehörige Bestellung noch nicht erledigt ist.
+
+Bei Freitagsbestellungen setzt sich die Markierung jeden Montag automatisch
+zurück, auch wenn eine Vorwochen-Bestellung noch offen ist.
 
 ## Vercel optional
 
