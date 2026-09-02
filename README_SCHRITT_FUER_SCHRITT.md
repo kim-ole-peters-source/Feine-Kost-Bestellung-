@@ -144,13 +144,19 @@ direkt unter `Sammlung als PDF` als rote Hinweisbox angezeigt und automatisch
 mit in die druckbare A4-PDF übernommen. Das gilt auch für Bestellungen, die
 keine direkten Produktionsartikel enthalten und nur eine Bemerkung haben.
 
-## Bereits-bestellt-Markierung
+## Eingangskontrolle Laden
 
-Im Bestellbereich Laden/Produktion werden Artikel nur als `offen bestellt`
-markiert, solange die zugehörige Bestellung noch nicht erledigt ist.
+Im Bestellbereich Laden:
 
-Bei Freitagsbestellungen setzt sich die Markierung jeden Montag automatisch
-zurück, auch wenn eine Vorwochen-Bestellung noch offen ist.
+1. `Neue Bestellung` öffnen.
+2. Unter `Freitagsbestellung` und `Monatsbestellung` erscheint
+   `Eingangskontrolle`.
+3. Grüner Haken bedeutet: Produkt ist angekommen.
+4. Rotes Kreuz bedeutet: Produkt ist noch nicht geliefert.
+
+Erst der grüne Haken entfernt die `Bereits bestellt`-Markierung im Shop.
+Nicht gelieferte Freitagsprodukte bleiben markiert und werden automatisch in
+die aktuelle Freitagsbestellung übernommen.
 
 ## Vercel optional
 

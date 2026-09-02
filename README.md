@@ -37,8 +37,10 @@ serverfähige Projektstruktur überführt. Die Bestellfunktionen bleiben gleich:
   als Sammelbestellung anzeigen und als A4-PDF drucken
 - Backend Produktion: Bemerkungen aus Bestellungen werden in der digitalen
   Sammlung und in der A4-PDF automatisch als rote Hinweisboxen angezeigt
-- Bestellbereich Laden/Produktion: `Bereits bestellt` markiert nur noch offene
-  Bestellungen und setzt sich bei Freitagsbestellungen montags automatisch zurück
+- Bestellbereich Laden: Eingangskontrolle für Freitagsbestellungen mit
+  angekommen/nicht-geliefert Status je Produkt
+- Nicht gelieferte Freitagsprodukte werden automatisch in die aktuelle
+  Freitagsbestellung übernommen und bleiben im Shop als bestellt markiert
 
 Der wichtigste technische Unterschied:
 
@@ -143,16 +145,21 @@ unter dem Button `Sammlung als PDF` und werden auch in die A4-PDF übernommen.
 Das gilt auch, wenn die Bestellung keine direkten Produktionsartikel enthält
 und nur aus einer Bemerkung besteht.
 
-## Bereits-bestellt-Markierung
+## Eingangskontrolle Laden
 
-Im Bestellbereich Laden und Produktion wird ein Artikel nur noch als
-`offen bestellt` markiert, solange eine passende Bestellung noch nicht als
-erledigt gesetzt wurde. Sobald die Bestellung im Backend erledigt ist,
-verschwindet die Markierung automatisch.
+Im Bestellbereich `Laden` erscheint oberhalb der Artikelsuche der Bereich
+`Eingangskontrolle`. Dort werden Produkte aus Freitagsbestellungen angezeigt,
+deren Wareneingang noch nicht bestätigt wurde.
 
-Bei Freitagsbestellungen setzt sich die Markierung zusätzlich jeden Montag
-zurück. Dadurch blockiert eine offene Bestellung aus der Vorwoche die neue
-Woche nicht mehr.
+- Grüner Haken: Produkt ist angekommen und verschwindet aus der
+  `Bereits bestellt`-Markierung.
+- Rotes Kreuz: Produkt ist noch nicht geliefert und bleibt als bestellt
+  markiert.
+- Offene Produkte aus alten Wochen werden automatisch in die aktuelle
+  Freitagsbestellung übernommen.
+
+Der Bestellstatus `erledigt` im Backend beendet damit nicht mehr automatisch
+die Laden-Markierung. Entscheidend ist die Eingangskontrolle pro Produkt.
 
 ## GitHub hochladen
 

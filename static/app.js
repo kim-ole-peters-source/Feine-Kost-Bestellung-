@@ -527,6 +527,64 @@ let state = {
   prodSelectionPreviewOpen: false,
 };
 
+function normalizeOrderStatus(value){
+  const status = String(value ?? '').trim().toLowerCase();
+  if(['erledigt', 'fertig', 'abgeschlossen', 'geschlossen', 'done', 'completed', 'complete', 'true', '1', 'ja'].includes(status)){
+    return 'erledigt';
+  }
+  return 'offen';
+}
+
+function isOrderErledigt(order){
+  return normalizeOrderStatus(order?.status) === 'erledigt';
+}
+
+function normalizeReceiptStatus(value){
+  const status = String(value ?? '').trim().toLowerCase();
+  if(['received', 'angekommen', 'geliefert', 'erhalten', 'ok', 'true', '1', 'ja'].includes(status)){
+    return 'received';
+  }
+  if(['missing', 'nicht_geliefert', 'nicht geliefert', 'fehlt', 'offen_nicht_geliefert'].includes(status)){
+    return 'missing';
+  }
+  if(['carried', 'uebernommen', 'übernommen', 'weitergefuehrt', 'weitergeführt'].includes(status)){
+    return 'carried';
+  }
+  return 'pending';
+}
+
+function normalizeLoadedOrders(){
+  if(!Array.isArray(state.orders)){
+    state.orders = [];
+    return true;
+  }
+  let changed = false;
+  state.orders.forEach(order => {
+    if(!Array.isArray(order.items)){
+      order.items = [];
+      changed = true;
+    }
+    if(!order.receiptStatus || typeof order.receiptStatus !== 'object' || Array.isArray(order.receiptStatus)){
+      order.receiptStatus = {};
+      changed = true;
+    } else {
+      Object.keys(order.receiptStatus).forEach(itemId => {
+        const normalizedReceipt = normalizeReceiptStatus(order.receiptStatus[itemId]);
+        if(order.receiptStatus[itemId] !== normalizedReceipt){
+          order.receiptStatus[itemId] = normalizedReceipt;
+          changed = true;
+        }
+      });
+    }
+    const normalizedStatus = normalizeOrderStatus(order.status);
+    if(order.status !== normalizedStatus){
+      order.status = normalizedStatus;
+      changed = true;
+    }
+  });
+  return changed;
+}
+
 async function loadOrders(){
   try{
     const res = await cloudStorage.get('orders');
@@ -534,6 +592,9 @@ async function loadOrders(){
   }catch(e){
     state.orders = [];
   }
+  let ordersChanged = normalizeLoadedOrders();
+  if(applyEingangskontrolleCarryover()) ordersChanged = true;
+  if(ordersChanged) await saveOrders();
   try{
     const res2 = await cloudStorage.get('artikeldaten');
     state.artikeldaten = res2 ? JSON.parse(res2.value) : {};
@@ -1541,6 +1602,9 @@ async function submitOrder(){
     status: "offen",
     items,
     chat: [],
+    receiptStatus: state.role === 'laden' && state.rhythmusFilter === 'freitag'
+      ? Object.fromEntries(items.map(item => [item.id, 'pending']))
+      : {},
   };
   state.orders.unshift(order);
   await saveOrders();
@@ -1557,7 +1621,7 @@ async function submitOrder(){
 async function toggleStatus(orderId){
   const o = state.orders.find(x=>x.id===orderId);
   if(!o) return;
-  o.status = o.status === "offen" ? "erledigt" : "offen";
+  o.status = isOrderErledigt(o) ? "offen" : "erledigt";
   await saveOrders();
   render();
 }
@@ -1568,7 +1632,7 @@ async function markAlleErledigt(idsCsv){
   let geaendert = false;
   ids.forEach(id => {
     const o = state.orders.find(x=>x.id===id);
-    if(o && o.status === 'offen'){ o.status = 'erledigt'; geaendert = true; }
+    if(o && !isOrderErledigt(o)){ o.status = 'erledigt'; geaendert = true; }
   });
   if(geaendert) await saveOrders();
   render();
@@ -1691,7 +1755,187 @@ function getOrderItemCountLabel(order, itemFilterFn){
   return count > 0 ? `${count} Position(en)` : 'Nur Bemerkung';
 }
 
+function dateKey(date){
+  const d = new Date(date);
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function getFreitagZeitraumForDate(value){
+  const base = new Date(value);
+  const tag = base.getDay();
+  const diffZuSamstag = (tag - 6 + 7) % 7;
+  const start = new Date(base);
+  start.setHours(0,1,0,0);
+  start.setDate(start.getDate() - diffZuSamstag);
+  const ende = new Date(start);
+  ende.setDate(start.getDate() + 6);
+  ende.setHours(23,59,59,999);
+  return { start, ende, key: `${dateKey(start)}_${dateKey(ende)}` };
+}
+
+function getCurrentFreitagZeitraum(){
+  return getFreitagZeitraumForDate(new Date());
+}
+
+function isDateInZeitraum(date, zeitraum){
+  const d = new Date(date);
+  return d >= zeitraum.start && d <= zeitraum.ende;
+}
+
+function isLadenFreitagsOrder(order){
+  return order?.bereich === 'Laden' && order?.rhythmus === 'freitag';
+}
+
+function getReceiptStatus(order, itemId){
+  return normalizeReceiptStatus(order?.receiptStatus?.[itemId]);
+}
+
+function setReceiptStatus(order, itemId, status){
+  if(!order.receiptStatus || typeof order.receiptStatus !== 'object' || Array.isArray(order.receiptStatus)){
+    order.receiptStatus = {};
+  }
+  order.receiptStatus[itemId] = normalizeReceiptStatus(status);
+  order.receiptUpdatedAt = new Date().toISOString();
+}
+
+function getOutstandingReceiptEntries(){
+  const entries = [];
+  state.orders.forEach(order => {
+    if(!isLadenFreitagsOrder(order)) return;
+    (order.items || []).forEach(item => {
+      const status = getReceiptStatus(order, item.id);
+      if(status === 'received' || status === 'carried') return;
+      entries.push({ order, item, status });
+    });
+  });
+  return entries;
+}
+
+function getEingangskontrolleGroups(){
+  const groups = {};
+  getOutstandingReceiptEntries().forEach(({order, item, status}) => {
+    const qty = Number(item.qty || 0);
+    if(qty <= 0) return;
+    if(!groups[item.id]){
+      groups[item.id] = {
+        id: item.id,
+        name: item.name,
+        unit: item.unit,
+        qty: 0,
+        pendingQty: 0,
+        missingQty: 0,
+        sources: [],
+      };
+    }
+    groups[item.id].qty += qty;
+    if(status === 'missing') groups[item.id].missingQty += qty;
+    else groups[item.id].pendingQty += qty;
+    groups[item.id].sources.push({ order, qty, status });
+  });
+  return Object.values(groups).sort((a,b)=>a.name.localeCompare(b.name,'de'));
+}
+
+function getEingangskontrolleSummen(){
+  return getEingangskontrolleGroups().map(group => ({
+    id: group.id,
+    name: group.name,
+    unit: group.unit,
+    qty: group.qty,
+    missingQty: group.missingQty,
+    pendingQty: group.pendingQty,
+  }));
+}
+
+function makeCarryoverOrderId(){
+  return `eg${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+}
+
+function applyEingangskontrolleCarryover(){
+  const currentZeitraum = getCurrentFreitagZeitraum();
+  const carryItems = {};
+  let changed = false;
+
+  state.orders.forEach(order => {
+    if(!isLadenFreitagsOrder(order)) return;
+    if(isDateInZeitraum(order.date, currentZeitraum)) return;
+    (order.items || []).forEach(item => {
+      const status = getReceiptStatus(order, item.id);
+      if(status === 'received' || status === 'carried') return;
+      const qty = Number(item.qty || 0);
+      if(qty <= 0) return;
+      if(!carryItems[item.id]){
+        const catalogItem = findItem(item.id) || item;
+        carryItems[item.id] = {
+          id: item.id,
+          name: catalogItem.name || item.name,
+          unit: catalogItem.unit || item.unit,
+          qty: 0,
+          sources: [],
+        };
+      }
+      carryItems[item.id].qty += qty;
+      carryItems[item.id].sources.push(`#${formatOrderNumber(order)} vom ${fmtDatumKurz(new Date(order.date))}`);
+      setReceiptStatus(order, item.id, 'carried');
+      changed = true;
+    });
+  });
+
+  const items = Object.values(carryItems);
+  if(items.length === 0) return changed;
+
+  let carryOrder = state.orders.find(order =>
+    isLadenFreitagsOrder(order)
+    && order.isReceiptCarryover === true
+    && order.receiptCarryoverKey === currentZeitraum.key
+  );
+  if(!carryOrder){
+    carryOrder = {
+      id: makeCarryoverOrderId(),
+      bereich: 'Laden',
+      rhythmus: 'freitag',
+      note: 'Automatische Übernahme aus der Eingangskontrolle: Ware wurde noch nicht als angekommen bestätigt.',
+      images: [],
+      date: new Date().toISOString(),
+      status: 'offen',
+      items: [],
+      chat: [],
+      receiptStatus: {},
+      isReceiptCarryover: true,
+      receiptCarryoverKey: currentZeitraum.key,
+    };
+    state.orders.unshift(carryOrder);
+  }
+
+  items.forEach(item => {
+    const existing = carryOrder.items.find(entry => entry.id === item.id);
+    if(existing){
+      existing.qty += item.qty;
+    } else {
+      carryOrder.items.push({ id: item.id, name: item.name, unit: item.unit, qty: item.qty });
+    }
+    setReceiptStatus(carryOrder, item.id, 'pending');
+  });
+
+  return true;
+}
+
+function alreadyOrderedBannerText(summary, unit, rhythmus, bereich){
+  if(rhythmus === 'freitag' && bereich === 'Laden'){
+    if(summary.missingQty > 0){
+      return `Noch nicht geliefert: ${summary.qty}× ${unit} bleibt bestellt`;
+    }
+    return `Eingangskontrolle offen: ${summary.qty}× ${unit} bestellt`;
+  }
+  return `Bereits ${summary.qty}× ${unit} offen bestellt`;
+}
+
 function getAlreadyOrderedSummen(rhythmus, bereich){
+  if(rhythmus === 'freitag' && bereich === 'Laden'){
+    return getEingangskontrolleSummen();
+  }
   const { start, ende } = getSammelZeitraum(rhythmus, 0);
   let markerStart = start;
   if(rhythmus === 'freitag'){
@@ -1705,7 +1949,7 @@ function getAlreadyOrderedSummen(rhythmus, bereich){
   const orders = state.orders.filter(o => {
     if(o.rhythmus !== rhythmus) return false;
     if(o.bereich !== bereich) return false;
-    if(o.status === 'erledigt') return false;
+    if(isOrderErledigt(o)) return false;
     const d = new Date(o.date);
     return d >= markerStart && d <= ende;
   });
@@ -2043,7 +2287,7 @@ async function downloadSelectedProdOrdersPdf(){
   doc.setFontSize(8.5);
   doc.setTextColor(...INK_SOFT);
   const selectedInfo = orders
-    .map(o => `#${formatOrderNumber(o)} · ${fmtDate(o.date)} · ${o.status === 'offen' ? 'Offen' : 'Erledigt'}`)
+    .map(o => `#${formatOrderNumber(o)} · ${fmtDate(o.date)} · ${isOrderErledigt(o) ? 'Erledigt' : 'Offen'}`)
     .join('   ');
   const infoLines = doc.splitTextToSize(selectedInfo, pageWidth - marginX*2);
   doc.text(infoLines, marginX, y);
@@ -2153,7 +2397,7 @@ async function downloadOrderPdf(orderId, produktionOnly){
     order.dept ? `Abteilung: ${order.dept}` : null,
   ].filter(Boolean);
   const rechtsInfo = [
-    order.status === 'offen' ? 'Offen' : 'Erledigt',
+    isOrderErledigt(order) ? 'Erledigt' : 'Offen',
     order.ziel ? `Ziel: ${order.ziel}` : null,
   ].filter(Boolean);
   const maxRows = Math.max(linksInfo.length, rechtsInfo.length);
@@ -2908,6 +3152,78 @@ function setSearch(v){
   if(s){ s.focus(); s.setSelectionRange(s.value.length, s.value.length); }
 }
 
+function renderEingangskontrolle(){
+  const groups = getEingangskontrolleGroups();
+  const rowsHtml = groups.map(group => {
+    const sourceDates = group.sources
+      .map(source => fmtDatumKurz(new Date(source.order.date)))
+      .filter(Boolean);
+    const uniqueDates = [...new Set(sourceDates)].slice(0, 4);
+    const extraDates = sourceDates.length > uniqueDates.length ? ` +${sourceDates.length - uniqueDates.length}` : '';
+    const statusClass = group.missingQty > 0 ? 'receipt-status-missing' : 'receipt-status-open';
+    const statusText = group.missingQty > 0 ? 'Noch nicht geliefert' : 'Eingang offen';
+    return `
+      <div class="receipt-row ${group.missingQty > 0 ? 'receipt-row-missing' : ''}">
+        <div class="receipt-info">
+          <div class="receipt-product">${escapeHtml(group.name)}</div>
+          <div class="receipt-meta">
+            ${group.qty}× ${escapeHtml(group.unit)}
+            · ${group.sources.length} Bestellung(en)
+            ${uniqueDates.length ? ` · ${uniqueDates.join(', ')}${extraDates}` : ''}
+          </div>
+          <span class="receipt-status ${statusClass}">${statusText}</span>
+        </div>
+        <div class="receipt-actions">
+          <button class="receipt-btn receipt-btn-ok" data-action="receiptreceived" data-itemid="${escapeHtml(group.id)}" aria-label="${escapeHtml(group.name)} angekommen">✓</button>
+          <button class="receipt-btn receipt-btn-missing" data-action="receiptmissing" data-itemid="${escapeHtml(group.id)}" aria-label="${escapeHtml(group.name)} nicht geliefert">✕</button>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  return `
+    <section class="receipt-control">
+      <div class="receipt-control-head">
+        <div>
+          <h2>Eingangskontrolle</h2>
+          <p>Freitagsbestellung</p>
+        </div>
+        <span>${groups.length} offen</span>
+      </div>
+      ${groups.length
+        ? `<div class="receipt-list">${rowsHtml}</div>`
+        : `<p class="receipt-empty">Keine offenen Wareneingänge.</p>`}
+    </section>
+  `;
+}
+
+async function markReceiptReceived(itemId){
+  let changed = false;
+  getOutstandingReceiptEntries()
+    .filter(entry => entry.item.id === itemId)
+    .forEach(entry => {
+      setReceiptStatus(entry.order, entry.item.id, 'received');
+      changed = true;
+    });
+  if(!changed) return;
+  await saveOrders();
+  render();
+}
+
+async function markReceiptMissing(itemId){
+  let changed = false;
+  getOutstandingReceiptEntries()
+    .filter(entry => entry.item.id === itemId)
+    .forEach(entry => {
+      setReceiptStatus(entry.order, entry.item.id, 'missing');
+      changed = true;
+    });
+  if(applyEingangskontrolleCarryover()) changed = true;
+  if(!changed) return;
+  await saveOrders();
+  render();
+}
+
 function renderNeu(catalog){
   const q = state.search.trim().toLowerCase();
   const catColors = ['c-terracotta','c-teal','c-blue','c-purple','c-gold'];
@@ -2920,7 +3236,7 @@ function renderNeu(catalog){
   const bereich = state.role === 'produktion' ? 'Produktion' : 'Laden';
   const bereitsBestelltMap = {};
   getAlreadyOrderedSummen(state.rhythmusFilter, bereich).forEach(s => {
-    bereitsBestelltMap[s.id] = s.qty;
+    bereitsBestelltMap[s.id] = s;
   });
 
   const catalogHtml = catalog.map((cat, catIndex) => {
@@ -2942,11 +3258,13 @@ function renderNeu(catalog){
           const zeigeHaendler = state.role !== 'laden';
           const extraParts = sd ? [sd.ve, zeigeHaendler ? sd.haendler : null].filter(Boolean) : [];
           const extra = extraParts.length > 0 ? ` &nbsp;·&nbsp; ${extraParts.join(' · ')}` : '';
-          const bereitsQty = bereitsBestelltMap[it.id];
+          const bereits = bereitsBestelltMap[it.id];
+          const bereitsQty = bereits?.qty || 0;
+          const bereitsText = bereitsQty ? alreadyOrderedBannerText(bereits, it.unit, state.rhythmusFilter, bereich) : '';
           return `
           <div class="item-row ${bereitsQty ? 'item-row-warnung' : ''}">
             <div>
-              ${bereitsQty ? `<div class="bereits-bestellt-banner">Bereits ${bereitsQty}× ${it.unit} offen bestellt</div>` : ''}
+              ${bereitsText ? `<div class="bereits-bestellt-banner">${escapeHtml(bereitsText)}</div>` : ''}
               <div class="item-name">${it.name}</div>
               <div class="item-unit">${it.unit}${extra}</div>
             </div>
@@ -2995,6 +3313,7 @@ function renderNeu(catalog){
           <button class="tab ${state.rhythmusFilter==='freitag'?'active':''}" data-action="rhythmusfilter" data-rhythmus="freitag">Freitagsbestellung</button>
           <button class="tab ${state.rhythmusFilter==='monat'?'active':''}" data-action="rhythmusfilter" data-rhythmus="monat">Monatsbestellung</button>
         </div>
+        ${state.role === 'laden' ? renderEingangskontrolle() : ''}
         <input class="search-box" id="search-input" type="text" placeholder="Artikel suchen…" value="${state.search.replace(/"/g,'&quot;')}" />
         ${noResults ? `<p class="no-results">Keine Artikel in dieser Bestellung gefunden.</p>` : catalogHtml}
       </div>
@@ -3035,7 +3354,7 @@ function isProduktionsArtikel(itemId){
 
 function renderHistorie(orders, itemFilterFn, groupMode){
   const filtered = orders.filter(o=>{
-    if(state.filter!=='alle' && o.status !== state.filter) return false;
+    if(state.filter!=='alle' && normalizeOrderStatus(o.status) !== state.filter) return false;
     return true;
   });
   if(filtered.length === 0){
@@ -3048,6 +3367,7 @@ function renderHistorie(orders, itemFilterFn, groupMode){
     const displayItems = itemFilterFn ? o.items.filter(itemFilterFn) : o.items;
     const isSelectableProdOrder = state.role === 'backend_produktion' && state.prodBackendTab === 'freitag' && isProductionRelevantOrder(o, itemFilterFn);
     const isSelectedProdOrder = state.prodSelectedOrderIds.has(o.id);
+    const istErledigt = isOrderErledigt(o);
 
     let itemsHtml;
     if(groupMode === 'haendler-kategorie'){
@@ -3117,7 +3437,7 @@ function renderHistorie(orders, itemFilterFn, groupMode){
             ${o.dept ? `<div class="dept">${o.dept}</div>` : ''}
             <span class="bereich-pill ${o.bereich==='Produktion' ? 'b-produktion' : 'b-laden'}">${o.bereich || 'Laden'}</span>
             ${o.ziel ? `<span class="bereich-pill b-ziel">Ziel: ${o.ziel}</span>` : ''}
-            <span class="status-pill ${o.status==='offen'?'status-offen':'status-erledigt'}">${o.status==='offen'?'Offen':'Erledigt'}</span>
+          <span class="status-pill ${istErledigt?'status-erledigt':'status-offen'}">${istErledigt?'Erledigt':'Offen'}</span>
           </div>
         </div>
         <div class="date">${fmtDate(o.date)}</div>
@@ -3166,7 +3486,7 @@ function renderHistorie(orders, itemFilterFn, groupMode){
         </div>
         ` : `
         <div class="order-actions">
-          <button class="${o.status==='offen' ? 'btn-complete' : 'btn-reopen'}" data-action="toggle" data-id="${o.id}">${o.status==='offen' ? '✓ Als erledigt markieren' : '↺ Als offen markieren'}</button>
+          <button class="${istErledigt ? 'btn-reopen' : 'btn-complete'}" data-action="toggle" data-id="${o.id}">${istErledigt ? '↺ Als offen markieren' : '✓ Als erledigt markieren'}</button>
           <button class="btn-pdf" data-action="editorder" data-id="${o.id}">✏️ Bearbeiten</button>
           <button class="btn-pdf" data-action="downloadpdf" data-id="${o.id}" data-produktiononly="${state.role==='backend_produktion' ? '1' : '0'}">📄 Als PDF</button>
           <button class="danger-outline" data-action="askdelete" data-id="${o.id}">🗑 Löschen</button>
@@ -3971,12 +4291,12 @@ function renderSammlung(rhythmus, itemFilterFn, produktionOnly, orderFilterFn, b
   `;}).join('');
 
   const zeigeEinzelbestellungen = state.role === 'laden' || state.role === 'backend_produktion';
-  const offeneIds = displayOrders.filter(o=>o.status==='offen').map(o=>o.id).join(',');
+  const offeneIds = displayOrders.filter(o=>!isOrderErledigt(o)).map(o=>o.id).join(',');
   const zeigeAlleErledigtBtn = state.role === 'backend_produktion' && offeneIds.length > 0;
   const zeigeAuswahlWerkzeuge = state.role === 'backend_produktion' && rhythmus === 'freitag';
   const sichtbareAuswahlOrders = zeigeAuswahlWerkzeuge
     ? displayOrders.filter(o => {
-        if(state.filter !== 'alle' && o.status !== state.filter) return false;
+        if(state.filter !== 'alle' && normalizeOrderStatus(o.status) !== state.filter) return false;
         return isProductionRelevantOrder(o, itemFilterFn);
       })
     : [];
@@ -4574,6 +4894,12 @@ function attachHandlers(){
   });
   const searchInput = document.getElementById('search-input');
   if(searchInput) searchInput.addEventListener('input', e=>setSearch(e.target.value));
+  document.querySelectorAll('[data-action="receiptreceived"]').forEach(el=>{
+    el.addEventListener('click', ()=>markReceiptReceived(el.dataset.itemid));
+  });
+  document.querySelectorAll('[data-action="receiptmissing"]').forEach(el=>{
+    el.addEventListener('click', ()=>markReceiptMissing(el.dataset.itemid));
+  });
   document.querySelectorAll('[data-action="inc"]').forEach(el=>{
     el.addEventListener('click', ()=>changeQty(el.dataset.id, 1));
   });

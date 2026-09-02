@@ -1,4 +1,4 @@
-const CACHE_NAME = 'gebrueder-pesch-bestellung-v10-prod-notes-reset';
+const CACHE_NAME = 'gebrueder-pesch-bestellung-v11-receipt-control';
 const STATIC_ASSETS = [
   '/',
   '/static/index.html',
