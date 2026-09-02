@@ -1,0 +1,12 @@
+
+# Produktivdaten
+bestellsystem.db
+bestellsystem_backup_*.db
+
+# Lokale Einstellungen-Backups
+settings_backup_*.json
+
+# Python
+venv/
+__pycache__/
+*.pyc
