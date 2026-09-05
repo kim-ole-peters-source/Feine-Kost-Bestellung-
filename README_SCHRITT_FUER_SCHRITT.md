@@ -154,11 +154,15 @@ Im Bestellbereich Laden:
 3. Grüner Haken bedeutet: Produkt ist angekommen.
 4. Rotes Kreuz bedeutet: Produkt ist noch nicht geliefert.
 
+Freitagsbestellungen aus der laufenden Bestellwoche bleiben im Shop als
+`Bereits bestellt` markiert. Ab Samstag nach der Bestellwoche erscheinen diese
+Artikel in der `Eingangskontrolle`.
+
 Erst der grüne Haken entfernt die `Bereits bestellt`-Markierung im Shop.
-Vorhandene Freitagsprodukte aus den letzten 35 Tagen erscheinen nach dem
-Update automatisch hier. Nicht gelieferte Freitagsprodukte bleiben markiert und
-werden nach Klick auf das rote Kreuz automatisch in die aktuelle
-Freitagsbestellung übernommen.
+Vorhandene Freitagsprodukte aus den letzten 35 Tagen werden nach dem Update
+automatisch fuer die Eingangskontrolle vorbereitet. Nicht gelieferte
+Freitagsprodukte bleiben markiert und werden nach Klick auf das rote Kreuz
+automatisch in die aktuelle Freitagsbestellung übernommen.
 
 ## Server-Update prüfen
 
@@ -172,10 +176,10 @@ cp settings.json settings_backup_$(date +%Y-%m-%d_%H-%M).json
 git pull
 pip install -r requirements.txt
 systemctl restart gebrueder-pesch-intern
-curl -s http://127.0.0.1:8017/ | grep 2026-09-05-receipt-foldout
+curl -s http://127.0.0.1:8017/ | grep 2026-09-05-receipt-saturday
 ```
 
-Wenn die letzte Zeile `2026-09-05-receipt-foldout` ausgibt, laeuft der neue
+Wenn die letzte Zeile `2026-09-05-receipt-saturday` ausgibt, laeuft der neue
 Stand auf dem Server.
 
 ## Vercel optional

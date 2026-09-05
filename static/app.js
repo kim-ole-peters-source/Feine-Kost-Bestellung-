@@ -1790,6 +1790,12 @@ function getCurrentFreitagZeitraum(){
   return getFreitagZeitraumForDate(new Date());
 }
 
+function isBeforeCurrentFreitagZeitraum(date){
+  const d = new Date(date);
+  if(Number.isNaN(d.getTime())) return false;
+  return d < getCurrentFreitagZeitraum().start;
+}
+
 function isDateInZeitraum(date, zeitraum){
   const d = new Date(date);
   if(Number.isNaN(d.getTime())) return false;
@@ -1838,22 +1844,30 @@ function setReceiptStatus(order, itemId, status){
   order.receiptUpdatedAt = new Date().toISOString();
 }
 
-function getOutstandingReceiptEntries(){
+function isReceiptControlReady(order, status){
+  if(status === 'missing') return true;
+  if(order?.isReceiptCarryover === true) return true;
+  return isBeforeCurrentFreitagZeitraum(order?.date);
+}
+
+function getOutstandingReceiptEntries(options = {}){
+  const readyOnly = options.readyOnly === true;
   const entries = [];
   state.orders.forEach(order => {
     if(!isLadenFreitagsOrder(order)) return;
     (order.items || []).forEach(item => {
       const status = getReceiptStatus(order, item.id);
       if(status === 'received' || status === 'carried') return;
+      if(readyOnly && !isReceiptControlReady(order, status)) return;
       entries.push({ order, item, status });
     });
   });
   return entries;
 }
 
-function getEingangskontrolleGroups(){
+function getReceiptGroups(readyOnly){
   const groups = {};
-  getOutstandingReceiptEntries().forEach(({order, item, status}) => {
+  getOutstandingReceiptEntries({ readyOnly }).forEach(({order, item, status}) => {
     const qty = Number(item.qty || 0);
     if(qty <= 0) return;
     if(!groups[item.id]){
@@ -1875,8 +1889,23 @@ function getEingangskontrolleGroups(){
   return Object.values(groups).sort((a,b)=>a.name.localeCompare(b.name,'de'));
 }
 
+function getEingangskontrolleGroups(){
+  return getReceiptGroups(true);
+}
+
 function getEingangskontrolleSummen(){
   return getEingangskontrolleGroups().map(group => ({
+    id: group.id,
+    name: group.name,
+    unit: group.unit,
+    qty: group.qty,
+    missingQty: group.missingQty,
+    pendingQty: group.pendingQty,
+  }));
+}
+
+function getActiveReceiptSummen(){
+  return getReceiptGroups(false).map(group => ({
     id: group.id,
     name: group.name,
     unit: group.unit,
@@ -1973,7 +2002,7 @@ function alreadyOrderedBannerText(summary, unit, rhythmus, bereich){
 
 function getAlreadyOrderedSummen(rhythmus, bereich){
   if(rhythmus === 'freitag' && bereich === 'Laden'){
-    return getEingangskontrolleSummen();
+    return getActiveReceiptSummen();
   }
   const { start, ende } = getSammelZeitraum(rhythmus, 0);
   let markerStart = start;
@@ -3244,7 +3273,7 @@ function toggleReceiptControl(){
 
 async function markReceiptReceived(itemId){
   let changed = false;
-  getOutstandingReceiptEntries()
+  getOutstandingReceiptEntries({ readyOnly: true })
     .filter(entry => entry.item.id === itemId)
     .forEach(entry => {
       setReceiptStatus(entry.order, entry.item.id, 'received');
@@ -3257,7 +3286,7 @@ async function markReceiptReceived(itemId){
 
 async function markReceiptMissing(itemId){
   let changed = false;
-  getOutstandingReceiptEntries()
+  getOutstandingReceiptEntries({ readyOnly: true })
     .filter(entry => entry.item.id === itemId)
     .forEach(entry => {
       setReceiptStatus(entry.order, entry.item.id, 'missing');

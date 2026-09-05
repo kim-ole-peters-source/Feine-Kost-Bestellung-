@@ -41,11 +41,12 @@ PORT = int(os.environ.get("PORT", "8000"))
 APP_NAME = "Gebrueder Pesch Bestellsystem"
 APP_SHORT_NAME = "Pesch Bestellung"
 THEME_COLOR = "#233a52"
-ASSET_VERSION = "2026-09-05-receipt-foldout"
+ASSET_VERSION = "2026-09-05-receipt-saturday"
 MAX_JSON_BYTES = int(os.environ.get("MAX_JSON_BYTES", str(60 * 1024 * 1024)))
 MAX_MAIL_ATTACHMENT_BYTES = int(os.environ.get("MAX_MAIL_ATTACHMENT_BYTES", str(12 * 1024 * 1024)))
 OPENAI_INVOICE_MODEL = os.environ.get("OPENAI_INVOICE_MODEL", "gpt-4.1-mini")
 OPENAI_RESPONSES_URL = os.environ.get("OPENAI_RESPONSES_URL", "https://api.openai.com/v1/responses")
+RECEIPT_MIGRATION_DAYS = 35
 
 ALLOWED_STORAGE_KEYS = {
     "orders",
@@ -143,6 +144,111 @@ def utc_now():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def normalize_order_status(value):
+    status = str(value or "").strip().lower()
+    if status in {
+        "erledigt",
+        "fertig",
+        "abgeschlossen",
+        "geschlossen",
+        "done",
+        "completed",
+        "complete",
+        "true",
+        "1",
+        "ja",
+    }:
+        return "erledigt"
+    return "offen"
+
+
+def normalize_receipt_status(value):
+    status = str(value or "").strip().lower()
+    if status in {"received", "angekommen", "geliefert", "erhalten", "ok", "true", "1", "ja"}:
+        return "received"
+    if status in {"missing", "nicht_geliefert", "nicht geliefert", "fehlt", "offen_nicht_geliefert"}:
+        return "missing"
+    if status in {"carried", "uebernommen", "übernommen", "weitergefuehrt", "weitergeführt"}:
+        return "carried"
+    return "pending"
+
+
+def parse_order_datetime(value):
+    if not value:
+        return None
+    raw = str(value).strip()
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def should_initialize_receipt_control(order, now=None):
+    if not isinstance(order, dict):
+        return False
+    if order.get("bereich") != "Laden" or order.get("rhythmus") != "freitag":
+        return False
+    if not isinstance(order.get("items"), list) or not order["items"]:
+        return False
+    order_date = parse_order_datetime(order.get("date"))
+    if not order_date:
+        return False
+    now = now or datetime.now(timezone.utc)
+    migration_start = now - timedelta(days=RECEIPT_MIGRATION_DAYS)
+    return order_date >= migration_start
+
+
+def migrate_orders_for_receipt_control(value):
+    if not isinstance(value, list):
+        return value, False
+
+    changed = False
+    now = datetime.now(timezone.utc)
+
+    for order in value:
+        if not isinstance(order, dict):
+            continue
+
+        items = order.get("items")
+        if not isinstance(items, list):
+            order["items"] = []
+            items = order["items"]
+            changed = True
+
+        normalized_status = normalize_order_status(order.get("status"))
+        if order.get("status") != normalized_status:
+            order["status"] = normalized_status
+            changed = True
+
+        receipt_status = order.get("receiptStatus")
+        if not isinstance(receipt_status, dict):
+            receipt_status = {}
+            order["receiptStatus"] = receipt_status
+            changed = True
+
+        for item_id in list(receipt_status.keys()):
+            normalized_receipt = normalize_receipt_status(receipt_status[item_id])
+            if receipt_status[item_id] != normalized_receipt:
+                receipt_status[item_id] = normalized_receipt
+                changed = True
+
+        if should_initialize_receipt_control(order, now=now):
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                item_id = str(item.get("id") or "").strip()
+                if item_id and item_id not in receipt_status:
+                    receipt_status[item_id] = "pending"
+                    changed = True
+
+    return value, changed
+
+
 def load_storage_value(key):
     if key not in ALLOWED_STORAGE_KEYS:
         return None
@@ -151,14 +257,21 @@ def load_storage_value(key):
     if not row:
         return DEFAULT_STORAGE_VALUES.get(key)
     try:
-        return json.loads(row["value"])
+        value = json.loads(row["value"])
     except json.JSONDecodeError:
         return DEFAULT_STORAGE_VALUES.get(key)
+    if key == "orders":
+        value, changed = migrate_orders_for_receipt_control(value)
+        if changed:
+            save_storage_value(key, value)
+    return value
 
 
 def save_storage_value(key, value):
     if key not in ALLOWED_STORAGE_KEYS:
         return False
+    if key == "orders":
+        value, _ = migrate_orders_for_receipt_control(value)
     encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
     with db_connect() as con:
         con.execute(

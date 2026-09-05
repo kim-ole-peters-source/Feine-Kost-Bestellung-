@@ -151,12 +151,16 @@ Im Bestellbereich `Laden` erscheint oberhalb der Artikelsuche der ausklappbare
 Reiter `Eingangskontrolle`. Dort werden Produkte aus Freitagsbestellungen
 angezeigt, deren Wareneingang noch nicht bestätigt wurde.
 
+- Freitagsbestellungen aus der laufenden Bestellwoche bleiben im Shop als
+  `Bereits bestellt` markiert.
+- Ab Samstag nach der Bestellwoche erscheinen diese Artikel in der
+  `Eingangskontrolle`.
 - Grüner Haken: Produkt ist angekommen und verschwindet aus der
   `Bereits bestellt`-Markierung.
 - Rotes Kreuz: Produkt ist noch nicht geliefert und bleibt als bestellt
   markiert.
 - Beim ersten Laden nach diesem Update werden vorhandene Freitagsprodukte aus
-  den letzten 35 Tagen automatisch in die Eingangskontrolle übernommen.
+  den letzten 35 Tagen automatisch fuer die Eingangskontrolle vorbereitet.
 - Sobald ein altes Produkt per rotem Kreuz als `nicht geliefert` markiert wird,
   wird es automatisch in die aktuelle Freitagsbestellung übernommen.
 
