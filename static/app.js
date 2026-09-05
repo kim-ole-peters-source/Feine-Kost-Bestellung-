@@ -1845,8 +1845,6 @@ function setReceiptStatus(order, itemId, status){
 }
 
 function isReceiptControlReady(order, status){
-  if(status === 'missing') return true;
-  if(order?.isReceiptCarryover === true) return true;
   return isBeforeCurrentFreitagZeitraum(order?.date);
 }
 

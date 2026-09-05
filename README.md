@@ -157,8 +157,8 @@ angezeigt, deren Wareneingang noch nicht bestätigt wurde.
   `Eingangskontrolle`.
 - Grüner Haken: Produkt ist angekommen und verschwindet aus der
   `Bereits bestellt`-Markierung.
-- Rotes Kreuz: Produkt ist noch nicht geliefert und bleibt als bestellt
-  markiert.
+- Rotes Kreuz: Produkt ist noch nicht geliefert, verschwindet aus der
+  `Eingangskontrolle`, bleibt aber als bestellt markiert.
 - Beim ersten Laden nach diesem Update werden vorhandene Freitagsprodukte aus
   den letzten 35 Tagen automatisch fuer die Eingangskontrolle vorbereitet.
 - Sobald ein altes Produkt per rotem Kreuz als `nicht geliefert` markiert wird,

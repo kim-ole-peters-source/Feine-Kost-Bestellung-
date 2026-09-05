@@ -152,7 +152,8 @@ Im Bestellbereich Laden:
 2. Unter `Freitagsbestellung` und `Monatsbestellung` erscheint der
    ausklappbare Reiter `Eingangskontrolle`.
 3. Grüner Haken bedeutet: Produkt ist angekommen.
-4. Rotes Kreuz bedeutet: Produkt ist noch nicht geliefert.
+4. Rotes Kreuz bedeutet: Produkt ist noch nicht geliefert und verschwindet aus
+   dem Reiter.
 
 Freitagsbestellungen aus der laufenden Bestellwoche bleiben im Shop als
 `Bereits bestellt` markiert. Ab Samstag nach der Bestellwoche erscheinen diese
@@ -176,10 +177,10 @@ cp settings.json settings_backup_$(date +%Y-%m-%d_%H-%M).json
 git pull
 pip install -r requirements.txt
 systemctl restart gebrueder-pesch-intern
-curl -s http://127.0.0.1:8017/ | grep 2026-09-05-receipt-saturday
+curl -s http://127.0.0.1:8017/ | grep 2026-09-05-receipt-hide-marked
 ```
 
-Wenn die letzte Zeile `2026-09-05-receipt-saturday` ausgibt, laeuft der neue
+Wenn die letzte Zeile `2026-09-05-receipt-hide-marked` ausgibt, laeuft der neue
 Stand auf dem Server.
 
 ## Vercel optional

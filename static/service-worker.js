@@ -1,4 +1,4 @@
-const CACHE_NAME = 'gebrueder-pesch-bestellung-v14-receipt-saturday';
+const CACHE_NAME = 'gebrueder-pesch-bestellung-v15-receipt-hide-marked';
 const STATIC_ASSETS = [
   '/',
   '/static/index.html',
