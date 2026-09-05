@@ -548,13 +548,18 @@
     border-left:5px solid var(--green);
     border-radius:var(--radius-sm);
     box-shadow:var(--shadow-sm);
-    padding:14px;
+    overflow:hidden;
   }
   .receipt-control-head{
     display:flex;align-items:flex-start;justify-content:space-between;gap:12px;
-    margin-bottom:12px;
+    width:100%;margin:0;padding:14px;
+    border:none;background:transparent;
+    color:inherit;font-family:inherit;text-align:left;
+    cursor:pointer;
   }
+  .receipt-control-open .receipt-control-head{border-bottom:1px solid var(--line);}
   .receipt-control-head h2{
+    display:flex;align-items:center;gap:7px;
     margin:0;font-size:15px;font-weight:800;color:var(--navy-dark);
   }
   .receipt-control-head p{
@@ -565,7 +570,14 @@
     border-radius:999px;padding:4px 10px;
     font-size:11.5px;font-weight:900;white-space:nowrap;
   }
-  .receipt-list{display:grid;gap:9px;}
+  .receipt-chevron{
+    display:inline-flex;align-items:center;justify-content:center;
+    width:18px;height:18px;border-radius:50%;
+    background:var(--green-bg);color:var(--green);
+    font-size:17px;line-height:1;transition:transform .15s;
+  }
+  .receipt-chevron.open{transform:rotate(90deg);}
+  .receipt-list{display:grid;gap:9px;padding:14px;}
   .receipt-row{
     display:flex;align-items:center;justify-content:space-between;gap:12px;
     background:var(--bg);border:1px solid var(--line);
@@ -602,7 +614,7 @@
   .receipt-btn-missing{background:#B3261E;}
   .receipt-btn-missing:hover{background:#8f1e18;}
   .receipt-empty{
-    margin:0;padding:8px 0 2px;
+    margin:0;padding:14px;
     font-size:13px;font-weight:700;color:var(--ink-soft);
   }
 

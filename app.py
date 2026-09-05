@@ -41,7 +41,7 @@ PORT = int(os.environ.get("PORT", "8000"))
 APP_NAME = "Gebrueder Pesch Bestellsystem"
 APP_SHORT_NAME = "Pesch Bestellung"
 THEME_COLOR = "#233a52"
-ASSET_VERSION = "2026-09-02-receipt-control"
+ASSET_VERSION = "2026-09-05-receipt-foldout"
 MAX_JSON_BYTES = int(os.environ.get("MAX_JSON_BYTES", str(60 * 1024 * 1024)))
 MAX_MAIL_ATTACHMENT_BYTES = int(os.environ.get("MAX_MAIL_ATTACHMENT_BYTES", str(12 * 1024 * 1024)))
 OPENAI_INVOICE_MODEL = os.environ.get("OPENAI_INVOICE_MODEL", "gpt-4.1-mini")
@@ -695,7 +695,8 @@ class App(BaseHTTPRequestHandler):
 
         if path.startswith("/static/"):
             requested = (STATIC_DIR / path.removeprefix("/static/")).resolve()
-            return self._serve_file(requested, send_body=send_body)
+            cache_static = requested.suffix.lower() not in {".html", ".css", ".js"}
+            return self._serve_file(requested, send_body=send_body, cache=cache_static)
 
         if path == "/api/storage":
             return self._send_json({"keys": sorted(ALLOWED_STORAGE_KEYS)}, send_body=send_body)

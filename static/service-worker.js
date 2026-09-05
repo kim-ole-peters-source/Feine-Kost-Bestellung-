@@ -1,4 +1,4 @@
-const CACHE_NAME = 'gebrueder-pesch-bestellung-v11-receipt-control';
+const CACHE_NAME = 'gebrueder-pesch-bestellung-v13-receipt-foldout';
 const STATIC_ASSETS = [
   '/',
   '/static/index.html',

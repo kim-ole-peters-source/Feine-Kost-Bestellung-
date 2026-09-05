@@ -525,7 +525,10 @@ let state = {
   pendingInvoiceProduct: null,
   prodSelectedOrderIds: new Set(),
   prodSelectionPreviewOpen: false,
+  receiptControlOpen: true,
 };
+
+const RECEIPT_MIGRATION_DAYS = 35;
 
 function normalizeOrderStatus(value){
   const status = String(value ?? '').trim().toLowerCase();
@@ -581,6 +584,13 @@ function normalizeLoadedOrders(){
       order.status = normalizedStatus;
       changed = true;
     }
+    if(shouldInitializeReceiptControl(order)){
+      order.items.forEach(item => {
+        if(!item?.id || hasReceiptStatusForItem(order, item.id)) return;
+        order.receiptStatus[item.id] = 'pending';
+        changed = true;
+      });
+    }
   });
   return changed;
 }
@@ -593,7 +603,7 @@ async function loadOrders(){
     state.orders = [];
   }
   let ordersChanged = normalizeLoadedOrders();
-  if(applyEingangskontrolleCarryover()) ordersChanged = true;
+  if(applyEingangskontrolleCarryover(null, true)) ordersChanged = true;
   if(ordersChanged) await saveOrders();
   try{
     const res2 = await cloudStorage.get('artikeldaten');
@@ -1782,15 +1792,42 @@ function getCurrentFreitagZeitraum(){
 
 function isDateInZeitraum(date, zeitraum){
   const d = new Date(date);
+  if(Number.isNaN(d.getTime())) return false;
   return d >= zeitraum.start && d <= zeitraum.ende;
+}
+
+function isDateInReceiptMigrationWindow(date){
+  const d = new Date(date);
+  if(Number.isNaN(d.getTime())) return false;
+  const start = new Date();
+  start.setHours(0,0,0,0);
+  start.setDate(start.getDate() - RECEIPT_MIGRATION_DAYS);
+  return d >= start;
 }
 
 function isLadenFreitagsOrder(order){
   return order?.bereich === 'Laden' && order?.rhythmus === 'freitag';
 }
 
+function hasReceiptStatusForItem(order, itemId){
+  const receiptStatus = order?.receiptStatus;
+  return !!receiptStatus
+    && typeof receiptStatus === 'object'
+    && !Array.isArray(receiptStatus)
+    && Object.prototype.hasOwnProperty.call(receiptStatus, itemId);
+}
+
+function shouldInitializeReceiptControl(order){
+  if(!isLadenFreitagsOrder(order)) return false;
+  if(!Array.isArray(order.items) || order.items.length === 0) return false;
+  return isDateInReceiptMigrationWindow(order.date);
+}
+
 function getReceiptStatus(order, itemId){
-  return normalizeReceiptStatus(order?.receiptStatus?.[itemId]);
+  if(hasReceiptStatusForItem(order, itemId)){
+    return normalizeReceiptStatus(order.receiptStatus[itemId]);
+  }
+  return 'received';
 }
 
 function setReceiptStatus(order, itemId, status){
@@ -1853,7 +1890,7 @@ function makeCarryoverOrderId(){
   return `eg${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 }
 
-function applyEingangskontrolleCarryover(){
+function applyEingangskontrolleCarryover(onlyItemId, onlyMissing){
   const currentZeitraum = getCurrentFreitagZeitraum();
   const carryItems = {};
   let changed = false;
@@ -1862,8 +1899,10 @@ function applyEingangskontrolleCarryover(){
     if(!isLadenFreitagsOrder(order)) return;
     if(isDateInZeitraum(order.date, currentZeitraum)) return;
     (order.items || []).forEach(item => {
+      if(onlyItemId && item.id !== onlyItemId) return;
       const status = getReceiptStatus(order, item.id);
       if(status === 'received' || status === 'carried') return;
+      if(onlyMissing && status !== 'missing') return;
       const qty = Number(item.qty || 0);
       if(qty <= 0) return;
       if(!carryItems[item.id]){
@@ -1916,7 +1955,7 @@ function applyEingangskontrolleCarryover(){
     } else {
       carryOrder.items.push({ id: item.id, name: item.name, unit: item.unit, qty: item.qty });
     }
-    setReceiptStatus(carryOrder, item.id, 'pending');
+    setReceiptStatus(carryOrder, item.id, 'missing');
   });
 
   return true;
@@ -3154,6 +3193,7 @@ function setSearch(v){
 
 function renderEingangskontrolle(){
   const groups = getEingangskontrolleGroups();
+  const isOpen = state.receiptControlOpen;
   const rowsHtml = groups.map(group => {
     const sourceDates = group.sources
       .map(source => fmtDatumKurz(new Date(source.order.date)))
@@ -3182,19 +3222,24 @@ function renderEingangskontrolle(){
   }).join('');
 
   return `
-    <section class="receipt-control">
-      <div class="receipt-control-head">
+    <section class="receipt-control ${isOpen ? 'receipt-control-open' : ''}">
+      <button class="receipt-control-head" type="button" data-action="togglereceiptcontrol" aria-expanded="${isOpen ? 'true' : 'false'}">
         <div>
-          <h2>Eingangskontrolle</h2>
+          <h2><span class="receipt-chevron ${isOpen ? 'open' : ''}">›</span>Eingangskontrolle</h2>
           <p>Freitagsbestellung</p>
         </div>
         <span>${groups.length} offen</span>
-      </div>
-      ${groups.length
+      </button>
+      ${isOpen ? (groups.length
         ? `<div class="receipt-list">${rowsHtml}</div>`
-        : `<p class="receipt-empty">Keine offenen Wareneingänge.</p>`}
+        : `<p class="receipt-empty">Keine offenen Wareneingänge.</p>`) : ''}
     </section>
   `;
+}
+
+function toggleReceiptControl(){
+  state.receiptControlOpen = !state.receiptControlOpen;
+  render();
 }
 
 async function markReceiptReceived(itemId){
@@ -3218,7 +3263,7 @@ async function markReceiptMissing(itemId){
       setReceiptStatus(entry.order, entry.item.id, 'missing');
       changed = true;
     });
-  if(applyEingangskontrolleCarryover()) changed = true;
+  if(applyEingangskontrolleCarryover(itemId, true)) changed = true;
   if(!changed) return;
   await saveOrders();
   render();
@@ -4894,6 +4939,9 @@ function attachHandlers(){
   });
   const searchInput = document.getElementById('search-input');
   if(searchInput) searchInput.addEventListener('input', e=>setSearch(e.target.value));
+  document.querySelectorAll('[data-action="togglereceiptcontrol"]').forEach(el=>{
+    el.addEventListener('click', toggleReceiptControl);
+  });
   document.querySelectorAll('[data-action="receiptreceived"]').forEach(el=>{
     el.addEventListener('click', ()=>markReceiptReceived(el.dataset.itemid));
   });
