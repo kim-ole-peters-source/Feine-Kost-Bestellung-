@@ -526,9 +526,28 @@ let state = {
   prodSelectedOrderIds: new Set(),
   prodSelectionPreviewOpen: false,
   receiptControlOpen: true,
+  timeEntries: [],
+  timeEmployees: [],
+  timeNotice: null,
+  timeAdminNotice: null,
+  timeMonth: "",
+  cockpitItems: { tasks: [], orders: [], infos: [], productionJobs: [] },
+  cockpitStates: {},
+  cockpitNotice: null,
+  cockpitAdminNotice: null,
 };
 
 const RECEIPT_MIGRATION_DAYS = 35;
+const COCKPIT_AREAS = ['Laden', 'Produktion', 'Alle'];
+const COCKPIT_WEEKDAYS = [
+  { value: 1, short: 'Mo', label: 'Montag' },
+  { value: 2, short: 'Di', label: 'Dienstag' },
+  { value: 3, short: 'Mi', label: 'Mittwoch' },
+  { value: 4, short: 'Do', label: 'Donnerstag' },
+  { value: 5, short: 'Fr', label: 'Freitag' },
+  { value: 6, short: 'Sa', label: 'Samstag' },
+  { value: 0, short: 'So', label: 'Sonntag' },
+];
 
 function normalizeOrderStatus(value){
   const status = String(value ?? '').trim().toLowerCase();
@@ -644,6 +663,31 @@ async function loadOrders(){
   }catch(e){
     state.invoices = [];
   }
+  try{
+    const res8 = await cloudStorage.get('timeEntries');
+    state.timeEntries = normalizeTimeEntries(res8 ? JSON.parse(res8.value) : []);
+  }catch(e){
+    state.timeEntries = [];
+  }
+  try{
+    const res9 = await cloudStorage.get('timeEmployees');
+    state.timeEmployees = normalizeTimeEmployees(res9 ? JSON.parse(res9.value) : []);
+  }catch(e){
+    state.timeEmployees = [];
+  }
+  try{
+    const res10 = await cloudStorage.get('cockpitItems');
+    state.cockpitItems = normalizeCockpitItems(res10 ? JSON.parse(res10.value) : null);
+  }catch(e){
+    state.cockpitItems = normalizeCockpitItems(null);
+  }
+  try{
+    const res11 = await cloudStorage.get('cockpitStates');
+    state.cockpitStates = normalizeCockpitStates(res11 ? JSON.parse(res11.value) : {});
+  }catch(e){
+    state.cockpitStates = {};
+  }
+  if(!state.timeMonth) state.timeMonth = todayInputValue().slice(0, 7);
   await loadInvoiceMailAccounts();
   let seedChanged = false;
   for(const id in ARTIKELDATEN_SEED){
@@ -723,6 +767,621 @@ async function saveInvoices(){
   }catch(e){
     console.error('Speichern fehlgeschlagen', e);
   }
+}
+
+async function saveTimeEntries(){
+  try{
+    await cloudStorage.set('timeEntries', JSON.stringify(state.timeEntries));
+  }catch(e){
+    console.error('Speichern fehlgeschlagen', e);
+  }
+}
+
+async function saveTimeEmployees(){
+  try{
+    await cloudStorage.set('timeEmployees', JSON.stringify(state.timeEmployees));
+  }catch(e){
+    console.error('Speichern fehlgeschlagen', e);
+  }
+}
+
+async function saveCockpitItems(){
+  try{
+    await cloudStorage.set('cockpitItems', JSON.stringify(state.cockpitItems));
+  }catch(e){
+    console.error('Speichern fehlgeschlagen', e);
+  }
+}
+
+async function saveCockpitStates(){
+  try{
+    await cloudStorage.set('cockpitStates', JSON.stringify(state.cockpitStates));
+  }catch(e){
+    console.error('Speichern fehlgeschlagen', e);
+  }
+}
+
+function makeLocalId(prefix){
+  return `${prefix}${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
+}
+
+function parseMoneyToNumber(value){
+  if(value === null || value === undefined || value === '') return 0;
+  const cleaned = String(value).trim().replace(/\./g, '').replace(',', '.');
+  const n = parseFloat(cleaned);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function formatDecimalValue(value){
+  const n = Number(value || 0);
+  if(!Number.isFinite(n) || n === 0) return '';
+  return n.toFixed(2).replace('.', ',').replace(/,00$/, '');
+}
+
+function getTimeEmployeeByName(name){
+  const key = String(name || '').trim().toLowerCase();
+  return state.timeEmployees.find(emp => emp.active && emp.name.toLowerCase() === key) || null;
+}
+
+function normalizeTimeEmployees(raw){
+  if(!Array.isArray(raw)) return [];
+  const seen = new Set();
+  return raw.map(entry => {
+    const name = typeof entry === 'string' ? entry : entry?.name;
+    const cleanName = String(name || '').trim();
+    if(!cleanName) return null;
+    const key = cleanName.toLowerCase();
+    if(seen.has(key)) return null;
+    seen.add(key);
+    return {
+      id: entry?.id || makeLocalId('emp'),
+      name: cleanName,
+      role: String(entry?.role || entry?.bereich || '').trim(),
+      hourlyWage: parseMoneyToNumber(entry?.hourlyWage ?? entry?.hourly_wage ?? 0),
+      monthlyHours: parseMoneyToNumber(entry?.monthlyHours ?? entry?.monthly_hours ?? 0),
+      active: entry?.active !== false,
+      createdAt: entry?.createdAt || new Date().toISOString(),
+      updatedAt: entry?.updatedAt || entry?.createdAt || new Date().toISOString(),
+    };
+  }).filter(Boolean).sort((a, b) => a.name.localeCompare(b.name, 'de'));
+}
+
+function normalizeCockpitArea(value){
+  const clean = String(value || '').trim();
+  return COCKPIT_AREAS.includes(clean) ? clean : 'Alle';
+}
+
+function normalizeCockpitScheduleType(value){
+  const clean = String(value || '').trim();
+  return ['daily', 'weekly', 'once'].includes(clean) ? clean : 'daily';
+}
+
+function normalizeCockpitWeekdays(value){
+  const raw = Array.isArray(value) ? value : String(value || '').split(',');
+  const days = raw.map(day => Number(day)).filter(day => COCKPIT_WEEKDAYS.some(w => w.value === day));
+  const unique = [...new Set(days)];
+  return unique.length ? unique : COCKPIT_WEEKDAYS.map(day => day.value);
+}
+
+function parseClockMinutes(value){
+  const match = String(value || '').trim().match(/^(\d{1,2}):(\d{2})$/);
+  if(!match) return null;
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  if(hours < 0 || hours > 23 || minutes < 0 || minutes > 59) return null;
+  return hours * 60 + minutes;
+}
+
+function calculateWorkMinutes(start, end){
+  const startMinutes = parseClockMinutes(start);
+  const endMinutes = parseClockMinutes(end);
+  if(startMinutes === null || endMinutes === null || endMinutes <= startMinutes) return null;
+  return endMinutes - startMinutes;
+}
+
+function formatWorkDuration(minutes){
+  const safe = Math.max(0, Number(minutes || 0));
+  const hours = Math.floor(safe / 60);
+  const rest = safe % 60;
+  return `${hours}:${String(rest).padStart(2, '0')} Std.`;
+}
+
+function normalizeTimeEntries(raw){
+  if(!Array.isArray(raw)) return [];
+  return raw.map(entry => {
+    const employeeName = String(entry?.employeeName || entry?.employee || entry?.name || '').trim();
+    const date = String(entry?.date || entry?.workDate || '').slice(0, 10);
+    const start = String(entry?.start || entry?.startTime || '').slice(0, 5);
+    const end = String(entry?.end || entry?.endTime || '').slice(0, 5);
+    const minutes = Number(entry?.minutes ?? calculateWorkMinutes(start, end) ?? 0);
+    if(!employeeName || !date || !start || !end || minutes <= 0) return null;
+    return {
+      id: entry?.id || makeLocalId('time'),
+      employeeName,
+      date,
+      start,
+      end,
+      minutes,
+      location: String(entry?.location || entry?.workLocation || 'Feine Kost').trim() || 'Feine Kost',
+      note: String(entry?.note || '').trim(),
+      createdAt: entry?.createdAt || new Date().toISOString(),
+      updatedAt: entry?.updatedAt || entry?.createdAt || new Date().toISOString(),
+    };
+  }).filter(Boolean).sort((a, b) => `${b.date} ${b.start}`.localeCompare(`${a.date} ${a.start}`));
+}
+
+function normalizeCockpitList(raw){
+  if(!Array.isArray(raw)) return [];
+  return raw.map(entry => {
+    const title = String(entry?.title || entry?.name || '').trim();
+    const text = String(entry?.text || entry?.description || entry?.note || '').trim();
+    if(!title && !text) return null;
+    return {
+      id: entry?.id || makeLocalId('cockpit'),
+      title: title || text.slice(0, 60),
+      text,
+      category: String(entry?.category || '').trim(),
+      area: normalizeCockpitArea(entry?.area),
+      scheduleType: normalizeCockpitScheduleType(entry?.scheduleType),
+      weekdays: normalizeCockpitWeekdays(entry?.weekdays),
+      date: String(entry?.date || entry?.dueDate || todayInputValue()).slice(0, 10),
+      active: entry?.active !== false,
+      createdAt: entry?.createdAt || new Date().toISOString(),
+      updatedAt: entry?.updatedAt || entry?.createdAt || new Date().toISOString(),
+    };
+  }).filter(Boolean);
+}
+
+function normalizeCockpitItems(raw){
+  const source = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  return {
+    tasks: normalizeCockpitList(source.tasks),
+    orders: normalizeCockpitList(source.orders),
+    infos: normalizeCockpitList(source.infos),
+    productionJobs: normalizeCockpitList(source.productionJobs),
+  };
+}
+
+function normalizeCockpitStates(raw){
+  if(!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const normalized = {};
+  Object.keys(raw).forEach(key => {
+    const value = raw[key];
+    if(value && typeof value === 'object' && !Array.isArray(value)){
+      normalized[key] = {
+        status: String(value.status || 'open'),
+        updatedAt: value.updatedAt || new Date().toISOString(),
+      };
+    } else if(value){
+      normalized[key] = { status: String(value), updatedAt: new Date().toISOString() };
+    }
+  });
+  return normalized;
+}
+
+function getActiveTimeEmployees(){
+  return normalizeTimeEmployees(state.timeEmployees).filter(employee => employee.active);
+}
+
+function getTimeMonth(){
+  return state.timeMonth || todayInputValue().slice(0, 7);
+}
+
+function monthLabel(month){
+  if(!month) return 'Aktueller Monat';
+  const [year, monthNum] = month.split('-').map(Number);
+  if(!year || !monthNum) return month;
+  return new Date(year, monthNum - 1, 1).toLocaleDateString('de-DE', { month:'long', year:'numeric' });
+}
+
+function getTimeEntriesForMonth(month){
+  return state.timeEntries.filter(entry => String(entry.date || '').startsWith(month));
+}
+
+function groupTimeEntries(entries){
+  const groups = {};
+  entries.forEach(entry => {
+    const key = entry.employeeName || 'Ohne Name';
+    if(!groups[key]) groups[key] = { employeeName: key, minutes: 0, entries: [] };
+    groups[key].minutes += Number(entry.minutes || 0);
+    groups[key].entries.push(entry);
+  });
+  return Object.values(groups).sort((a, b) => a.employeeName.localeCompare(b.employeeName, 'de'));
+}
+
+function getTimeEmployeeSettings(name){
+  const key = String(name || '').trim().toLowerCase();
+  return state.timeEmployees.find(emp => emp.name.toLowerCase() === key) || null;
+}
+
+function getPayrollValues(employeeName, minutes){
+  const employee = getTimeEmployeeSettings(employeeName) || {};
+  const hours = Number(minutes || 0) / 60;
+  const monthlyHours = Number(employee.monthlyHours || 0);
+  const hourlyWage = Number(employee.hourlyWage || 0);
+  return {
+    hours,
+    overtime: monthlyHours > 0 ? Math.max(0, hours - monthlyHours) : 0,
+    salary: hours * hourlyWage,
+  };
+}
+
+function escapeCsvCell(value){
+  const text = String(value ?? '');
+  return /[;"\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+function downloadCsvFile(filename, rows){
+  const csv = rows.map(row => row.map(escapeCsvCell).join(';')).join('\n');
+  const blob = new Blob([`\ufeff${csv}`], { type:'text/csv;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => {
+    URL.revokeObjectURL(a.href);
+    a.remove();
+  }, 0);
+}
+
+async function saveTimeEntryFromForm(){
+  const employeeName = document.getElementById('time-employee')?.value.trim() || '';
+  const location = document.getElementById('time-location')?.value.trim() || 'Feine Kost';
+  const date = document.getElementById('time-date')?.value || todayInputValue();
+  const start = document.getElementById('time-start')?.value || '';
+  const end = document.getElementById('time-end')?.value || '';
+  const note = document.getElementById('time-note')?.value.trim() || '';
+  const minutes = calculateWorkMinutes(start, end);
+  if(!employeeName){
+    state.timeNotice = { type:'error', text:'Bitte einen Mitarbeiter auswählen.' };
+    render();
+    return;
+  }
+  if(!getTimeEmployeeByName(employeeName)){
+    state.timeNotice = { type:'error', text:'Dieser Mitarbeiter ist nicht als aktive Person angelegt.' };
+    render();
+    return;
+  }
+  if(minutes === null){
+    state.timeNotice = { type:'error', text:'Bitte gültige Start- und Endzeit eintragen.' };
+    render();
+    return;
+  }
+  state.timeEntries.unshift({
+    id: makeLocalId('time'),
+    employeeName,
+    location,
+    date,
+    start,
+    end,
+    minutes,
+    note,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  });
+  state.timeEntries = normalizeTimeEntries(state.timeEntries);
+  state.timeNotice = { type:'success', text:`Arbeitszeit für ${employeeName} wurde gespeichert.` };
+  await saveTimeEntries();
+  render();
+}
+
+async function addTimeEmployee(){
+  const name = document.getElementById('time-employee-new')?.value.trim() || '';
+  const role = document.getElementById('time-employee-role')?.value.trim() || '';
+  const hourlyWage = parseMoneyToNumber(document.getElementById('time-employee-wage')?.value || '');
+  const monthlyHours = parseMoneyToNumber(document.getElementById('time-employee-hours')?.value || '');
+  if(!name){
+    state.timeAdminNotice = { type:'error', text:'Bitte einen Mitarbeiternamen eintragen.' };
+    render();
+    return;
+  }
+  if(state.timeEmployees.some(emp => emp.name.toLowerCase() === name.toLowerCase())){
+    state.timeAdminNotice = { type:'error', text:'Dieser Mitarbeiter ist bereits angelegt.' };
+    render();
+    return;
+  }
+  state.timeEmployees.push({
+    id: makeLocalId('emp'),
+    name,
+    role,
+    hourlyWage,
+    monthlyHours,
+    active: true,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  });
+  state.timeEmployees = normalizeTimeEmployees(state.timeEmployees);
+  state.timeAdminNotice = { type:'success', text:`${name} wurde hinzugefügt.` };
+  await saveTimeEmployees();
+  render();
+}
+
+async function updateTimeEmployee(employeeId){
+  const employee = state.timeEmployees.find(emp => emp.id === employeeId);
+  if(!employee) return;
+  const prefix = `time-employee-${employeeId}`;
+  const name = document.getElementById(`${prefix}-name`)?.value.trim() || '';
+  const role = document.getElementById(`${prefix}-role`)?.value.trim() || '';
+  const hourlyWage = parseMoneyToNumber(document.getElementById(`${prefix}-wage`)?.value || '');
+  const monthlyHours = parseMoneyToNumber(document.getElementById(`${prefix}-hours`)?.value || '');
+  const active = Boolean(document.getElementById(`${prefix}-active`)?.checked);
+  if(!name){
+    state.timeAdminNotice = { type:'error', text:'Bitte einen Mitarbeiternamen eintragen.' };
+    render();
+    return;
+  }
+  const duplicate = state.timeEmployees.some(emp => emp.id !== employeeId && emp.name.toLowerCase() === name.toLowerCase());
+  if(duplicate){
+    state.timeAdminNotice = { type:'error', text:'Dieser Mitarbeiter ist bereits angelegt.' };
+    render();
+    return;
+  }
+  const oldName = employee.name;
+  Object.assign(employee, {
+    name,
+    role,
+    hourlyWage,
+    monthlyHours,
+    active,
+    updatedAt: new Date().toISOString(),
+  });
+  if(oldName !== name){
+    state.timeEntries.forEach(entry => {
+      if(entry.employeeName === oldName) entry.employeeName = name;
+    });
+    await saveTimeEntries();
+  }
+  state.timeEmployees = normalizeTimeEmployees(state.timeEmployees);
+  state.timeAdminNotice = { type:'success', text:`Stammdaten für ${name} wurden gespeichert.` };
+  await saveTimeEmployees();
+  render();
+}
+
+async function toggleTimeEmployee(employeeId){
+  const employee = state.timeEmployees.find(emp => emp.id === employeeId);
+  if(!employee) return;
+  employee.active = !employee.active;
+  employee.updatedAt = new Date().toISOString();
+  state.timeAdminNotice = { type:'success', text:`${employee.name} ist jetzt ${employee.active ? 'aktiv' : 'inaktiv'}.` };
+  await saveTimeEmployees();
+  render();
+}
+
+async function deleteTimeEmployee(employeeId){
+  const employee = state.timeEmployees.find(emp => emp.id === employeeId);
+  if(!employee) return;
+  if(!confirm(`Mitarbeiter "${employee.name}" wirklich aus der Auswahlliste entfernen? Bestehende Zeiten bleiben erhalten.`)) return;
+  state.timeEmployees = state.timeEmployees.filter(emp => emp.id !== employeeId);
+  state.timeAdminNotice = { type:'success', text:`${employee.name} wurde entfernt.` };
+  await saveTimeEmployees();
+  render();
+}
+
+async function updateTimeEntry(entryId){
+  const entry = state.timeEntries.find(item => item.id === entryId);
+  if(!entry) return;
+  const prefix = `time-entry-${entryId}`;
+  const employeeName = document.getElementById(`${prefix}-name`)?.value.trim() || '';
+  const date = document.getElementById(`${prefix}-date`)?.value || '';
+  const start = document.getElementById(`${prefix}-start`)?.value || '';
+  const end = document.getElementById(`${prefix}-end`)?.value || '';
+  const location = document.getElementById(`${prefix}-location`)?.value.trim() || 'Feine Kost';
+  const note = document.getElementById(`${prefix}-note`)?.value.trim() || '';
+  const minutes = calculateWorkMinutes(start, end);
+  if(!employeeName || !date || minutes === null){
+    state.timeAdminNotice = { type:'error', text:'Zeit konnte nicht gespeichert werden. Bitte Name, Datum und Uhrzeiten prüfen.' };
+    render();
+    return;
+  }
+  Object.assign(entry, {
+    employeeName,
+    date,
+    start,
+    end,
+    location,
+    note,
+    minutes,
+    updatedAt: new Date().toISOString(),
+  });
+  state.timeEntries = normalizeTimeEntries(state.timeEntries);
+  state.timeAdminNotice = { type:'success', text:'Arbeitszeit wurde aktualisiert.' };
+  await saveTimeEntries();
+  render();
+}
+
+async function deleteTimeEntry(entryId){
+  const entry = state.timeEntries.find(item => item.id === entryId);
+  if(!entry) return;
+  if(!confirm(`Zeiteintrag von ${entry.employeeName} am ${fmtDate(entry.date)} wirklich löschen?`)) return;
+  state.timeEntries = state.timeEntries.filter(item => item.id !== entryId);
+  state.timeAdminNotice = { type:'success', text:'Zeiteintrag wurde gelöscht.' };
+  await saveTimeEntries();
+  render();
+}
+
+function setTimeMonth(value){
+  state.timeMonth = value || todayInputValue().slice(0, 7);
+  render();
+}
+
+function exportTimeMonthCsv(){
+  const month = getTimeMonth();
+  const rows = [
+    ['Mitarbeiter', 'Datum', 'Start', 'Ende', 'Stunden', 'Minuten', 'Einsatzort', 'Bemerkung'],
+    ...getTimeEntriesForMonth(month).map(entry => [
+      entry.employeeName,
+      fmtDate(entry.date),
+      entry.start,
+      entry.end,
+      (entry.minutes / 60).toFixed(2).replace('.', ','),
+      entry.minutes,
+      entry.location,
+      entry.note,
+    ]),
+  ];
+  const grouped = groupTimeEntries(getTimeEntriesForMonth(month));
+  if(grouped.length){
+    rows.push([]);
+    rows.push(['Summen', 'Stunden', 'Überstunden', 'Gehalt']);
+    grouped.forEach(group => {
+      const payroll = getPayrollValues(group.employeeName, group.minutes);
+      rows.push([
+        group.employeeName,
+        payroll.hours.toFixed(2).replace('.', ','),
+        payroll.overtime.toFixed(2).replace('.', ','),
+        formatEuro(payroll.salary),
+      ]);
+    });
+  }
+  downloadCsvFile(`zeiterfassung_${month}.csv`, rows);
+}
+
+function getCockpitTypeLabel(type){
+  return {
+    tasks: 'Tagesaufgaben',
+    orders: 'Bestellhinweise',
+    infos: 'Infofelder',
+    productionJobs: 'Produktionsaufgaben',
+  }[type] || 'Cockpit';
+}
+
+function isScheduledCockpitType(type){
+  return type === 'tasks' || type === 'productionJobs';
+}
+
+function itemMatchesCockpitArea(item, area){
+  if(!area || area === 'Alle') return true;
+  const itemArea = normalizeCockpitArea(item?.area);
+  return itemArea === 'Alle' || itemArea === area;
+}
+
+function itemIsDueToday(item, type){
+  if(!isScheduledCockpitType(type)) return true;
+  const scheduleType = normalizeCockpitScheduleType(item?.scheduleType);
+  if(scheduleType === 'once'){
+    return String(item?.date || '').slice(0, 10) === todayInputValue();
+  }
+  if(scheduleType === 'weekly'){
+    const todayDay = new Date(`${todayInputValue()}T12:00:00`).getDay();
+    return normalizeCockpitWeekdays(item?.weekdays).includes(todayDay);
+  }
+  return true;
+}
+
+function getCockpitScheduleLabel(item, type){
+  if(!isScheduledCockpitType(type)) return normalizeCockpitArea(item?.area);
+  const scheduleType = normalizeCockpitScheduleType(item?.scheduleType);
+  if(scheduleType === 'once') return `Einmalig am ${fmtDate(item?.date || todayInputValue())}`;
+  if(scheduleType === 'weekly'){
+    const days = normalizeCockpitWeekdays(item?.weekdays)
+      .map(value => COCKPIT_WEEKDAYS.find(day => day.value === value)?.short)
+      .filter(Boolean)
+      .join(', ');
+    return `Wöchentlich: ${days}`;
+  }
+  return 'Täglich';
+}
+
+function getCockpitStateKey(type, itemId){
+  const dayScoped = type === 'tasks' || type === 'productionJobs';
+  return `${dayScoped ? todayInputValue() : 'dauerhaft'}|${type}|${itemId}`;
+}
+
+function getCockpitStatus(type, itemId){
+  return state.cockpitStates[getCockpitStateKey(type, itemId)]?.status || 'open';
+}
+
+function readCockpitWeekdays(prefix){
+  return Array.from(document.querySelectorAll(`[data-weekday-group="${prefix}"]:checked`))
+    .map(input => Number(input.value))
+    .filter(day => COCKPIT_WEEKDAYS.some(entry => entry.value === day));
+}
+
+function readCockpitSchedule(prefix, type){
+  if(!isScheduledCockpitType(type)){
+    return { scheduleType: 'daily', weekdays: COCKPIT_WEEKDAYS.map(day => day.value), date: todayInputValue() };
+  }
+  const scheduleType = normalizeCockpitScheduleType(document.getElementById(`${prefix}-schedule`)?.value || 'daily');
+  return {
+    scheduleType,
+    weekdays: readCockpitWeekdays(prefix),
+    date: document.getElementById(`${prefix}-date`)?.value || todayInputValue(),
+  };
+}
+
+async function setCockpitStatus(type, itemId, status){
+  state.cockpitStates[getCockpitStateKey(type, itemId)] = {
+    status,
+    updatedAt: new Date().toISOString(),
+  };
+  state.cockpitNotice = { type:'success', text:'Cockpit wurde aktualisiert.' };
+  await saveCockpitStates();
+  render();
+}
+
+async function addCockpitItem(type){
+  if(!state.cockpitItems[type]) return;
+  const title = document.getElementById(`cockpit-${type}-title`)?.value.trim() || '';
+  const text = document.getElementById(`cockpit-${type}-text`)?.value.trim() || '';
+  const area = normalizeCockpitArea(document.getElementById(`cockpit-${type}-area`)?.value || 'Alle');
+  const schedule = readCockpitSchedule(`cockpit-${type}`, type);
+  if(!title && !text){
+    state.cockpitAdminNotice = { type:'error', text:`Bitte für "${getCockpitTypeLabel(type)}" mindestens Titel oder Text eintragen.` };
+    render();
+    return;
+  }
+  state.cockpitItems[type].push({
+    id: makeLocalId('cockpit'),
+    title: title || text.slice(0, 60),
+    text,
+    category: '',
+    area,
+    ...schedule,
+    active: true,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  });
+  state.cockpitAdminNotice = { type:'success', text:`${getCockpitTypeLabel(type)} wurde ergänzt.` };
+  await saveCockpitItems();
+  render();
+}
+
+async function updateCockpitItem(type, itemId){
+  const item = state.cockpitItems[type]?.find(entry => entry.id === itemId);
+  if(!item) return;
+  const prefix = `cockpit-${type}-${itemId}`;
+  const title = document.getElementById(`${prefix}-title`)?.value.trim() || '';
+  const text = document.getElementById(`${prefix}-text`)?.value.trim() || '';
+  const area = normalizeCockpitArea(document.getElementById(`${prefix}-area`)?.value || 'Alle');
+  const schedule = readCockpitSchedule(prefix, type);
+  const active = Boolean(document.getElementById(`${prefix}-active`)?.checked);
+  if(!title && !text){
+    state.cockpitAdminNotice = { type:'error', text:'Bitte mindestens Titel oder Text eintragen.' };
+    render();
+    return;
+  }
+  Object.assign(item, {
+    title: title || text.slice(0, 60),
+    text,
+    area,
+    ...schedule,
+    active,
+    updatedAt: new Date().toISOString(),
+  });
+  state.cockpitAdminNotice = { type:'success', text:'Cockpit-Eintrag wurde gespeichert.' };
+  await saveCockpitItems();
+  render();
+}
+
+async function deleteCockpitItem(type, itemId){
+  const item = state.cockpitItems[type]?.find(entry => entry.id === itemId);
+  if(!item) return;
+  if(!confirm(`Cockpit-Eintrag "${item.title}" wirklich löschen?`)) return;
+  state.cockpitItems[type] = state.cockpitItems[type].filter(entry => entry.id !== itemId);
+  state.cockpitAdminNotice = { type:'success', text:'Cockpit-Eintrag wurde gelöscht.' };
+  await saveCockpitItems();
+  render();
 }
 
 function defaultInvoiceMailDraft(){
@@ -2554,6 +3213,8 @@ function setRole(r){
   state.prodBackendTab = 'freitag';
   state.gfTab = 'freitagssammlung';
   state.sammlungOffset = 0;
+  state.timeNotice = null;
+  state.cockpitNotice = null;
   clearProdOrderSelection();
   if(r === 'laden' || r === 'produktion'){
     loadCartFromLocal(r);
@@ -2702,6 +3363,8 @@ function setGfTab(t){
   state.invoiceUploadOpen = false;
   state.editingInvoiceId = null;
   state.pendingInvoiceProduct = null;
+  state.timeAdminNotice = null;
+  state.cockpitAdminNotice = null;
   state.sammlungOffset = 0;
   render();
 }
@@ -3643,6 +4306,409 @@ function getGreeting(){
   return special ? `${time}! ${special}` : `${time}!`;
 }
 
+function renderTimeEntryContent(defaultLocation = 'Feine Kost'){
+  const today = todayInputValue();
+  const activeEmployees = getActiveTimeEmployees();
+  const todayEntries = state.timeEntries.filter(entry => entry.date === today);
+  const todayMinutes = todayEntries.reduce((sum, entry) => sum + Number(entry.minutes || 0), 0);
+  const employeeOptions = activeEmployees.map(employee =>
+    `<option value="${escapeHtml(employee.name)}">${escapeHtml(employee.role || '')}</option>`
+  ).join('');
+  const employeeField = activeEmployees.length
+    ? `
+      <label class="field">Mitarbeiter</label>
+      <select class="field" id="time-employee">
+        <option value="">Bitte auswählen</option>
+        ${activeEmployees.map(employee => `<option value="${escapeHtml(employee.name)}">${escapeHtml(employee.name)}${employee.role ? ` · ${escapeHtml(employee.role)}` : ''}</option>`).join('')}
+      </select>
+    `
+    : `<div class="notice notice-error">Es sind noch keine aktiven Personen für die Zeiterfassung angelegt.</div>`;
+  const todayRows = todayEntries.length === 0
+    ? `<p class="no-results">Heute sind noch keine Zeiten erfasst.</p>`
+    : todayEntries.map(entry => `
+      <div class="time-entry-card">
+        <div>
+          <div class="item-name">${escapeHtml(entry.employeeName)}</div>
+          <div class="item-unit">${escapeHtml(entry.start)} bis ${escapeHtml(entry.end)} · ${escapeHtml(entry.location)}${entry.note ? ` · ${escapeHtml(entry.note)}` : ''}</div>
+        </div>
+        <strong>${formatWorkDuration(entry.minutes)}</strong>
+      </div>
+    `).join('');
+
+  return `
+    <div class="time-page-grid">
+      <div class="sammel-card time-form-card">
+        ${state.timeNotice ? `<div class="notice notice-${state.timeNotice.type}">${escapeHtml(state.timeNotice.text)}</div>` : ''}
+        <datalist id="time-employee-list">${employeeOptions}</datalist>
+        ${employeeField}
+        <div class="time-form-grid">
+          <div>
+            <label class="field">Datum</label>
+            <input class="field" id="time-date" type="date" value="${today}" />
+          </div>
+          <div>
+            <label class="field">Einsatzort</label>
+            <input class="field" id="time-location" type="text" value="${escapeHtml(defaultLocation)}" />
+          </div>
+          <div>
+            <label class="field">Start</label>
+            <input class="field" id="time-start" type="time" />
+          </div>
+          <div>
+            <label class="field">Ende</label>
+            <input class="field" id="time-end" type="time" />
+          </div>
+        </div>
+        <label class="field">Bemerkung</label>
+        <textarea class="field" id="time-note" rows="3" placeholder="Optional"></textarea>
+        <button class="submit-btn" data-action="savetimeentry" ${activeEmployees.length ? '' : 'disabled'}>Zeit speichern</button>
+      </div>
+      <div class="sammel-card time-summary-card">
+        <div class="sammel-card-head">
+          <div>
+            <div class="item-name">Heute</div>
+            <div class="item-unit">${fmtDate(today)}</div>
+          </div>
+          <span class="sammel-count">${todayEntries.length} Einträge</span>
+        </div>
+        <div class="time-total">${formatWorkDuration(todayMinutes)}</div>
+        <div class="time-entry-list">${todayRows}</div>
+      </div>
+    </div>
+  `;
+}
+
+function renderZeiterfassungSeite(defaultLocation = 'Feine Kost'){
+  return `
+    <div class="masthead">
+      <div>
+        <p class="eyebrow">Zeiterfassung</p>
+        <h1>Arbeitszeit eintragen</h1>
+      </div>
+      <div class="meta"><button class="switch-role" data-action="role" data-role="">🏠 Zum Home-Bildschirm</button></div>
+    </div>
+    ${renderTimeEntryContent(defaultLocation)}
+  `;
+}
+
+function renderBackendTime(defaultLocation = 'Feine Kost'){
+  return `
+    ${renderTimeEntryContent(defaultLocation)}
+    ${renderTimeAdmin()}
+  `;
+}
+
+function renderTimeAdmin(){
+  const month = getTimeMonth();
+  const entries = getTimeEntriesForMonth(month);
+  const totalMinutes = entries.reduce((sum, entry) => sum + Number(entry.minutes || 0), 0);
+  const grouped = groupTimeEntries(entries);
+  const employeeRows = state.timeEmployees.length === 0
+    ? `<p class="no-results">Noch keine Personen angelegt.</p>`
+    : state.timeEmployees.map(employee => {
+      const prefix = `time-employee-${employee.id}`;
+      return `
+        <div class="time-employee-row time-employee-stamm-row">
+          <input class="field" id="${prefix}-name" type="text" value="${escapeHtml(employee.name)}" placeholder="Name" />
+          <input class="field" id="${prefix}-role" type="text" value="${escapeHtml(employee.role || '')}" placeholder="Bereich / Rolle" />
+          <input class="field" id="${prefix}-wage" type="text" inputmode="decimal" value="${escapeHtml(formatDecimalValue(employee.hourlyWage))}" placeholder="Stundenlohn" />
+          <input class="field" id="${prefix}-hours" type="text" inputmode="decimal" value="${escapeHtml(formatDecimalValue(employee.monthlyHours))}" placeholder="Monatsstunden" />
+          <label class="cockpit-active"><input id="${prefix}-active" type="checkbox" ${employee.active ? 'checked' : ''} /> Aktiv</label>
+          <div class="haendler-row-actions">
+            <button class="edit-btn" data-action="updatetimeemployee" data-id="${employee.id}">Speichern</button>
+            <button class="danger-outline edit-btn" data-action="deletetimeemployee" data-id="${employee.id}">Entfernen</button>
+          </div>
+        </div>
+      `;
+    }).join('');
+  const summaryRows = grouped.length === 0
+    ? `<p class="no-results">Für ${escapeHtml(monthLabel(month))} sind noch keine Zeiten vorhanden.</p>`
+    : grouped.map(group => {
+      const payroll = getPayrollValues(group.employeeName, group.minutes);
+      return `
+        <div class="time-summary-row">
+          <span class="sammel-item-name">${escapeHtml(group.employeeName)}</span>
+          <span class="sammel-item-meta">${group.entries.length} Einträge</span>
+          <span class="sammel-qty-chip">${formatWorkDuration(group.minutes)}</span>
+          <span class="sammel-item-meta">Überstunden ${formatDecimalValue(payroll.overtime) || '0'} Std.</span>
+          <span class="sammel-item-meta">Gehalt ${formatEuro(payroll.salary)}</span>
+        </div>
+      `;
+    }).join('');
+  const entryRows = entries.length === 0
+    ? `<p class="no-results">Keine Zeiteinträge im ausgewählten Monat.</p>`
+    : entries.map(entry => {
+      const prefix = `time-entry-${entry.id}`;
+      return `
+        <div class="time-admin-entry">
+          <input class="field" id="${prefix}-name" type="text" value="${escapeHtml(entry.employeeName)}" />
+          <input class="field" id="${prefix}-date" type="date" value="${escapeHtml(entry.date)}" />
+          <input class="field" id="${prefix}-start" type="time" value="${escapeHtml(entry.start)}" />
+          <input class="field" id="${prefix}-end" type="time" value="${escapeHtml(entry.end)}" />
+          <input class="field" id="${prefix}-location" type="text" value="${escapeHtml(entry.location)}" />
+          <input class="field" id="${prefix}-note" type="text" value="${escapeHtml(entry.note)}" placeholder="Bemerkung" />
+          <div class="time-admin-actions">
+            <span>${formatWorkDuration(entry.minutes)}</span>
+            <button class="edit-btn" data-action="updatetimeentry" data-id="${entry.id}">Speichern</button>
+            <button class="danger-outline edit-btn" data-action="deletetimeentry" data-id="${entry.id}">Löschen</button>
+          </div>
+        </div>
+      `;
+    }).join('');
+
+  return `
+    <div class="invoice-kpi-grid">
+      <div class="sammel-card"><div class="item-unit">Monat</div><div class="sammel-stat-num">${escapeHtml(monthLabel(month))}</div></div>
+      <div class="sammel-card"><div class="item-unit">Einträge</div><div class="sammel-stat-num">${entries.length}</div></div>
+      <div class="sammel-card"><div class="item-unit">Mitarbeiter</div><div class="sammel-stat-num">${grouped.length}</div></div>
+      <div class="sammel-card"><div class="item-unit">Gesamtzeit</div><div class="sammel-stat-num">${formatWorkDuration(totalMinutes)}</div></div>
+    </div>
+    ${state.timeAdminNotice ? `<div class="notice notice-${state.timeAdminNotice.type}">${escapeHtml(state.timeAdminNotice.text)}</div>` : ''}
+    <div class="sammel-card">
+      <div class="sammel-card-head">
+        <div>
+          <div class="item-name">Personenstammdaten</div>
+          <div class="item-unit">Diese Personen erscheinen im Zeiterfassungsformular.</div>
+        </div>
+      </div>
+      <div class="time-admin-add">
+        <input class="field" id="time-employee-new" type="text" placeholder="Name" />
+        <input class="field" id="time-employee-role" type="text" placeholder="Bereich / Rolle" />
+        <input class="field" id="time-employee-wage" type="text" inputmode="decimal" placeholder="Stundenlohn" />
+        <input class="field" id="time-employee-hours" type="text" inputmode="decimal" placeholder="Monatsstunden" />
+        <button class="new-item-btn" data-action="addtimeemployee">+ Person</button>
+      </div>
+      <div class="time-employee-head">
+        <span>Name</span><span>Bereich</span><span>Stundenlohn</span><span>Monatsstunden</span><span>Status</span><span>Aktion</span>
+      </div>
+      <div class="time-employee-list">${employeeRows}</div>
+    </div>
+    <div class="sammel-card">
+      <div class="sammel-card-head">
+        <div>
+          <div class="item-name">Monatsübersicht</div>
+          <div class="item-unit">Zeiten filtern, prüfen und als CSV exportieren.</div>
+        </div>
+        <button class="btn-pdf edit-btn" data-action="exporttimecsv" ${entries.length === 0 ? 'disabled' : ''}>CSV exportieren</button>
+      </div>
+      <div class="time-month-filter">
+        <input class="field" id="time-admin-month" type="month" value="${escapeHtml(month)}" />
+      </div>
+      <div class="time-summary-list">${summaryRows}</div>
+    </div>
+    <div class="sammel-card">
+      <div class="sammel-card-head">
+        <div>
+          <div class="item-name">Einträge bearbeiten</div>
+          <div class="item-unit">Korrekturen werden sofort in der Übersicht berücksichtigt.</div>
+        </div>
+      </div>
+      <div class="time-admin-head">
+        <span>Name</span><span>Datum</span><span>Start</span><span>Ende</span><span>Ort</span><span>Bemerkung</span><span>Aktion</span>
+      </div>
+      <div class="time-admin-list">${entryRows}</div>
+    </div>
+  `;
+}
+
+function renderCockpitLiveList(type, area){
+  const items = (state.cockpitItems[type] || [])
+    .filter(item => item.active && itemMatchesCockpitArea(item, area) && itemIsDueToday(item, type));
+  if(items.length === 0) return `<p class="no-results">Noch keine Einträge hinterlegt.</p>`;
+  return items.map(item => {
+    const status = getCockpitStatus(type, item.id);
+    const isDone = status === 'done';
+    const isOrdered = status === 'ordered';
+    const chip = isDone ? 'Erledigt' : (isOrdered ? 'Bestellt' : 'Offen');
+    const chipClass = isDone ? 'cockpit-chip-done' : (isOrdered ? 'cockpit-chip-ordered' : 'cockpit-chip-open');
+    const actionHtml = type === 'orders'
+      ? `
+        <div class="cockpit-actions">
+          <button class="edit-btn" data-action="cockpitstatus" data-type="${type}" data-id="${item.id}" data-status="ordered">Bestellt</button>
+          <button class="btn-complete edit-btn" data-action="cockpitstatus" data-type="${type}" data-id="${item.id}" data-status="done">Erledigt</button>
+          <button class="popup-cancel cockpit-reset-btn" data-action="cockpitstatus" data-type="${type}" data-id="${item.id}" data-status="open">Zurück</button>
+        </div>
+      `
+      : `
+        <div class="cockpit-actions">
+          <button class="btn-complete edit-btn" data-action="cockpitstatus" data-type="${type}" data-id="${item.id}" data-status="done">✓ Erledigt</button>
+          <button class="popup-cancel cockpit-reset-btn" data-action="cockpitstatus" data-type="${type}" data-id="${item.id}" data-status="open">Zurück</button>
+        </div>
+      `;
+    return `
+      <div class="cockpit-live-row ${isDone ? 'cockpit-live-row-done' : ''}">
+        <div>
+          <div class="item-name">${escapeHtml(item.title)}</div>
+          ${item.text ? `<div class="item-unit">${escapeHtml(item.text)}</div>` : ''}
+          <div class="item-unit">${escapeHtml(normalizeCockpitArea(item.area))} · ${escapeHtml(getCockpitScheduleLabel(item, type))}</div>
+          <span class="cockpit-chip ${chipClass}">${chip}</span>
+        </div>
+        ${actionHtml}
+      </div>
+    `;
+  }).join('');
+}
+
+function renderCockpitInfoList(area){
+  const items = (state.cockpitItems.infos || []).filter(item => item.active && itemMatchesCockpitArea(item, area));
+  if(items.length === 0) return `<p class="no-results">Noch keine Infofelder hinterlegt.</p>`;
+  return items.map(item => `
+    <div class="cockpit-info-card">
+      <div class="item-name">${escapeHtml(item.title)}</div>
+      <div class="item-unit">${escapeHtml(normalizeCockpitArea(item.area))}</div>
+      ${item.text ? `<div class="cockpit-info-text">${escapeHtml(item.text)}</div>` : ''}
+    </div>
+  `).join('');
+}
+
+function renderCockpitContent(area = 'Alle'){
+  return `
+    ${state.cockpitNotice ? `<div class="notice notice-${state.cockpitNotice.type}">${escapeHtml(state.cockpitNotice.text)}</div>` : ''}
+    <div class="cockpit-grid">
+      <div class="sammel-card cockpit-panel">
+        <div class="sammel-card-head">
+          <div>
+            <div class="item-name">Tagesaufgaben</div>
+            <div class="item-unit">Wird täglich neu geöffnet.</div>
+          </div>
+        </div>
+        ${renderCockpitLiveList('tasks', area)}
+      </div>
+      <div class="sammel-card cockpit-panel">
+        <div class="sammel-card-head">
+          <div>
+            <div class="item-name">Bestellhinweise</div>
+            <div class="item-unit">Dauerhafte Übersicht bis zur Erledigung.</div>
+          </div>
+        </div>
+        ${renderCockpitLiveList('orders', area)}
+      </div>
+      <div class="sammel-card cockpit-panel">
+        <div class="sammel-card-head">
+          <div>
+            <div class="item-name">Produktionsaufgaben</div>
+            <div class="item-unit">Für den heutigen Produktionstag.</div>
+          </div>
+        </div>
+        ${renderCockpitLiveList('productionJobs', area)}
+      </div>
+      <div class="sammel-card cockpit-panel">
+        <div class="sammel-card-head">
+          <div>
+            <div class="item-name">Infofelder</div>
+            <div class="item-unit">Wichtige Hinweise für den Betrieb.</div>
+          </div>
+        </div>
+        <div class="cockpit-info-list">${renderCockpitInfoList(area)}</div>
+      </div>
+    </div>
+  `;
+}
+
+function renderCockpitSeite(area = 'Alle'){
+  return `
+    <div class="masthead">
+      <div>
+        <p class="eyebrow">Cockpit</p>
+        <h1>Tagesübersicht ${area !== 'Alle' ? escapeHtml(area) : ''}</h1>
+      </div>
+      <div class="meta"><button class="switch-role" data-action="role" data-role="">🏠 Zum Home-Bildschirm</button></div>
+    </div>
+    ${renderCockpitContent(area)}
+  `;
+}
+
+function renderCockpitAreaSelect(id, selected, areaScope = null){
+  const allowedAreas = areaScope && areaScope !== 'Alle' ? [areaScope, 'Alle'] : COCKPIT_AREAS;
+  return `
+    <select class="field" id="${id}">
+      ${allowedAreas.map(area =>
+        `<option value="${area}" ${normalizeCockpitArea(selected) === area ? 'selected' : ''}>${area}</option>`
+      ).join('')}
+    </select>
+  `;
+}
+
+function renderCockpitScheduleControls(prefix, item, type){
+  if(!isScheduledCockpitType(type)) return '';
+  const scheduleType = normalizeCockpitScheduleType(item?.scheduleType);
+  const weekdays = normalizeCockpitWeekdays(item?.weekdays);
+  const date = String(item?.date || todayInputValue()).slice(0, 10);
+  const dayChecks = COCKPIT_WEEKDAYS.map(day => `
+    <label class="weekday-pill">
+      <input data-weekday-group="${prefix}" type="checkbox" value="${day.value}" ${weekdays.includes(day.value) ? 'checked' : ''} />
+      <span>${day.short}</span>
+    </label>
+  `).join('');
+  return `
+    <div class="cockpit-schedule-grid">
+      <select class="field" id="${prefix}-schedule">
+        <option value="daily" ${scheduleType === 'daily' ? 'selected' : ''}>Täglich</option>
+        <option value="weekly" ${scheduleType === 'weekly' ? 'selected' : ''}>Wöchentlich nach Wochentagen</option>
+        <option value="once" ${scheduleType === 'once' ? 'selected' : ''}>Einmalig an Datum</option>
+      </select>
+      <input class="field" id="${prefix}-date" type="date" value="${escapeHtml(date)}" />
+      <div class="weekday-picker">${dayChecks}</div>
+    </div>
+  `;
+}
+
+function renderCockpitAdminSection(type, helper, areaScope = null){
+  const allItems = state.cockpitItems[type] || [];
+  const items = areaScope && areaScope !== 'Alle'
+    ? allItems.filter(item => ['Alle', areaScope].includes(normalizeCockpitArea(item.area)))
+    : allItems;
+  const rows = items.length === 0
+    ? `<p class="no-results">Noch keine Einträge in "${escapeHtml(getCockpitTypeLabel(type))}".</p>`
+    : items.map(item => {
+      const prefix = `cockpit-${type}-${item.id}`;
+      return `
+        <div class="cockpit-admin-row">
+          <input class="field" id="${prefix}-title" type="text" value="${escapeHtml(item.title)}" placeholder="Titel" />
+          <textarea class="field" id="${prefix}-text" rows="2" placeholder="Text">${escapeHtml(item.text)}</textarea>
+          ${renderCockpitAreaSelect(`${prefix}-area`, item.area, areaScope)}
+          ${renderCockpitScheduleControls(prefix, item, type)}
+          <label class="cockpit-active"><input id="${prefix}-active" type="checkbox" ${item.active ? 'checked' : ''} /> Aktiv</label>
+          <div class="haendler-row-actions">
+            <button class="edit-btn" data-action="updatecockpititem" data-type="${type}" data-id="${item.id}">Speichern</button>
+            <button class="danger-outline edit-btn" data-action="deletecockpititem" data-type="${type}" data-id="${item.id}">Löschen</button>
+          </div>
+        </div>
+      `;
+    }).join('');
+  return `
+    <div class="sammel-card cockpit-admin-section">
+      <div class="sammel-card-head">
+        <div>
+          <div class="item-name">${escapeHtml(getCockpitTypeLabel(type))}</div>
+          <div class="item-unit">${escapeHtml(helper)}</div>
+        </div>
+        <span class="sammel-count">${items.length} Einträge</span>
+      </div>
+      <div class="cockpit-admin-add">
+        <input class="field" id="cockpit-${type}-title" type="text" placeholder="Titel" />
+        <textarea class="field" id="cockpit-${type}-text" rows="2" placeholder="Text / Hinweis"></textarea>
+        ${renderCockpitAreaSelect(`cockpit-${type}-area`, areaScope || 'Alle', areaScope)}
+        ${renderCockpitScheduleControls(`cockpit-${type}`, { scheduleType: 'daily', weekdays: COCKPIT_WEEKDAYS.map(day => day.value), date: todayInputValue() }, type)}
+        <button class="new-item-btn" data-action="addcockpititem" data-type="${type}">+ Eintrag</button>
+      </div>
+      <div class="cockpit-admin-list">${rows}</div>
+    </div>
+  `;
+}
+
+function renderCockpitAdmin(areaScope = null){
+  return `
+    ${state.cockpitAdminNotice ? `<div class="notice notice-${state.cockpitAdminNotice.type}">${escapeHtml(state.cockpitAdminNotice.text)}</div>` : ''}
+    <div class="cockpit-admin-grid">
+      ${renderCockpitAdminSection('tasks', 'Aufgaben, die im Cockpit jeden Tag wieder offen erscheinen.', areaScope)}
+      ${renderCockpitAdminSection('orders', 'Bestellhinweise mit Status Offen, Bestellt oder Erledigt.', areaScope)}
+      ${renderCockpitAdminSection('productionJobs', 'Tägliche Aufgaben für Produktion und Vorbereitung.', areaScope)}
+      ${renderCockpitAdminSection('infos', 'Dauerhafte Infofelder für wichtige betriebliche Hinweise.', areaScope)}
+    </div>
+  `;
+}
+
 function renderRoleScreen(){
   return `
     <div class="role-screen">
@@ -3714,20 +4780,28 @@ function renderEmpfangSeite(){
       <div class="tabs">
         <button class="tab ${state.prodBackendTab==='freitag'?'active':''}" data-action="prodbackendtab" data-prodbackendtab="freitag">📦 Freitags-Sammlung</button>
         <button class="tab ${state.prodBackendTab==='monat'?'active':''}" data-action="prodbackendtab" data-prodbackendtab="monat">📅 Monats-Sammlung</button>
+        <button class="tab ${state.prodBackendTab==='cockpit'?'active':''}" data-action="prodbackendtab" data-prodbackendtab="cockpit">Cockpit</button>
+        <button class="tab ${state.prodBackendTab==='zeiterfassung'?'active':''}" data-action="prodbackendtab" data-prodbackendtab="zeiterfassung">Zeiterfassung</button>
       </div>
     `;
 
     const rhythmus = state.prodBackendTab === 'monat' ? 'monat' : 'freitag';
+    const title = state.prodBackendTab === 'cockpit'
+      ? 'Cockpit Produktion'
+      : (state.prodBackendTab === 'zeiterfassung' ? 'Zeiterfassung Produktion' : (rhythmus === 'monat' ? 'Monats-Sammlung' : 'Freitags-Sammlung'));
+    const content = state.prodBackendTab === 'cockpit'
+      ? `${renderCockpitContent('Produktion')}${renderCockpitAdmin('Produktion')}`
+      : (state.prodBackendTab === 'zeiterfassung' ? renderBackendTime('Produktion') : renderSammlung(rhythmus, it => isProduktionsArtikel(it.id), true));
     return `
       <div class="masthead">
         <div>
           <p class="eyebrow">Backend Produktion</p>
-          <h1>${rhythmus === 'monat' ? 'Monats-Sammlung' : 'Freitags-Sammlung'}</h1>
+          <h1>${title}</h1>
         </div>
         <div class="meta"><button class="switch-role" data-action="role" data-role="">🏠 Zum Home-Bildschirm</button></div>
       </div>
       ${prodTabsHtml}
-      ${renderSammlung(rhythmus, it => isProduktionsArtikel(it.id), true)}
+      ${content}
       ${state.prodSelectionPreviewOpen ? renderProdOrderSelectionPreview() : ''}
     `;
   }
@@ -3738,6 +4812,8 @@ function renderEmpfangSeite(){
       <button class="tab ${state.gfTab==='freitagssammlung'?'active':''}" data-action="gftab" data-gftab="freitagssammlung">📦 Freitags-Sammlung</button>
       <button class="tab ${state.gfTab==='monatssammlung'?'active':''}" data-action="gftab" data-gftab="monatssammlung">📅 Monats-Sammlung</button>
       <button class="tab ${state.gfTab==='rechnungen'?'active':''}" data-action="gftab" data-gftab="rechnungen">Rechnungen & Controlling</button>
+      <button class="tab ${state.gfTab==='zeiterfassung'?'active':''}" data-action="gftab" data-gftab="zeiterfassung">Zeiterfassung</button>
+      <button class="tab ${state.gfTab==='cockpit'?'active':''}" data-action="gftab" data-gftab="cockpit">Cockpit</button>
       <button class="tab ${state.gfTab==='artikel'?'active':''}" data-action="gftab" data-gftab="artikel">Artikelstammdaten (VE/Händler)</button>
       <button class="tab ${state.gfTab==='haendler'?'active':''}" data-action="gftab" data-gftab="haendler">Händler verwalten</button>
       <button class="tab ${state.gfTab==='email'?'active':''}" data-action="gftab" data-gftab="email">E-Mail-Empfänger</button>
@@ -3786,6 +4862,35 @@ function renderEmpfangSeite(){
       ${state.invoiceUploadOpen ? renderInvoiceUploadPopup() : ''}
       ${state.invoiceCrawlSummary ? renderInvoiceCrawlSummaryPopup() : ''}
       ${state.newItemPopupOpen ? renderNewItemPopup() : ''}
+    `;
+  }
+
+  if(state.gfTab === 'zeiterfassung'){
+    return `
+      <div class="masthead">
+        <div>
+          <p class="eyebrow">Backend Geschäftsführung</p>
+          <h1>Zeiterfassung</h1>
+        </div>
+        <div class="meta"><button class="switch-role" data-action="role" data-role="">🏠 Zum Home-Bildschirm</button></div>
+      </div>
+      ${tabsHtml}
+      ${renderBackendTime('Laden')}
+    `;
+  }
+
+  if(state.gfTab === 'cockpit'){
+    return `
+      <div class="masthead">
+        <div>
+          <p class="eyebrow">Backend Geschäftsführung</p>
+          <h1>Cockpit verwalten</h1>
+        </div>
+        <div class="meta"><button class="switch-role" data-action="role" data-role="">🏠 Zum Home-Bildschirm</button></div>
+      </div>
+      ${tabsHtml}
+      ${renderCockpitContent('Laden')}
+      ${renderCockpitAdmin('Laden')}
     `;
   }
 
@@ -4687,7 +5792,10 @@ function render(){
   }
 
   const isBackend = state.role === 'backend_produktion' || state.role === 'backend_geschaeftsfuehrung';
-  app.innerHTML = (isBackend ? renderEmpfangSeite() : renderBestellSeite())
+  const mainHtml = state.role === 'zeiterfassung'
+    ? renderZeiterfassungSeite()
+    : (state.role === 'cockpit' ? renderCockpitSeite() : (isBackend ? renderEmpfangSeite() : renderBestellSeite()));
+  app.innerHTML = mainHtml
     + (state.lightboxSrc ? renderLightbox() : '')
     + (state.editingOrderId ? renderOrderEditPopup() : '');
   attachHandlers();
@@ -4777,6 +5885,44 @@ function attachHandlers(){
   });
   document.querySelectorAll('[data-action="gftab"]').forEach(el=>{
     el.addEventListener('click', ()=>setGfTab(el.dataset.gftab));
+  });
+  document.querySelectorAll('[data-action="savetimeentry"]').forEach(el=>{
+    el.addEventListener('click', saveTimeEntryFromForm);
+  });
+  document.querySelectorAll('[data-action="addtimeemployee"]').forEach(el=>{
+    el.addEventListener('click', addTimeEmployee);
+  });
+  document.querySelectorAll('[data-action="updatetimeemployee"]').forEach(el=>{
+    el.addEventListener('click', ()=>updateTimeEmployee(el.dataset.id));
+  });
+  document.querySelectorAll('[data-action="toggletimeemployee"]').forEach(el=>{
+    el.addEventListener('click', ()=>toggleTimeEmployee(el.dataset.id));
+  });
+  document.querySelectorAll('[data-action="deletetimeemployee"]').forEach(el=>{
+    el.addEventListener('click', ()=>deleteTimeEmployee(el.dataset.id));
+  });
+  document.querySelectorAll('[data-action="updatetimeentry"]').forEach(el=>{
+    el.addEventListener('click', ()=>updateTimeEntry(el.dataset.id));
+  });
+  document.querySelectorAll('[data-action="deletetimeentry"]').forEach(el=>{
+    el.addEventListener('click', ()=>deleteTimeEntry(el.dataset.id));
+  });
+  document.querySelectorAll('[data-action="exporttimecsv"]').forEach(el=>{
+    el.addEventListener('click', exportTimeMonthCsv);
+  });
+  const timeAdminMonth = document.getElementById('time-admin-month');
+  if(timeAdminMonth) timeAdminMonth.addEventListener('change', e=>setTimeMonth(e.target.value));
+  document.querySelectorAll('[data-action="cockpitstatus"]').forEach(el=>{
+    el.addEventListener('click', ()=>setCockpitStatus(el.dataset.type, el.dataset.id, el.dataset.status));
+  });
+  document.querySelectorAll('[data-action="addcockpititem"]').forEach(el=>{
+    el.addEventListener('click', ()=>addCockpitItem(el.dataset.type));
+  });
+  document.querySelectorAll('[data-action="updatecockpititem"]').forEach(el=>{
+    el.addEventListener('click', ()=>updateCockpitItem(el.dataset.type, el.dataset.id));
+  });
+  document.querySelectorAll('[data-action="deletecockpititem"]').forEach(el=>{
+    el.addEventListener('click', ()=>deleteCockpitItem(el.dataset.type, el.dataset.id));
   });
   document.querySelectorAll('[data-action="openinvoiceupload"]').forEach(el=>{
     el.addEventListener('click', openInvoiceUpload);

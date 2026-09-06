@@ -41,7 +41,7 @@ PORT = int(os.environ.get("PORT", "8000"))
 APP_NAME = "Gebrueder Pesch Bestellsystem"
 APP_SHORT_NAME = "Pesch Bestellung"
 THEME_COLOR = "#233a52"
-ASSET_VERSION = "2026-09-05-receipt-hide-marked"
+ASSET_VERSION = "2026-09-06-backend-time-cockpit"
 MAX_JSON_BYTES = int(os.environ.get("MAX_JSON_BYTES", str(60 * 1024 * 1024)))
 MAX_MAIL_ATTACHMENT_BYTES = int(os.environ.get("MAX_MAIL_ATTACHMENT_BYTES", str(12 * 1024 * 1024)))
 OPENAI_INVOICE_MODEL = os.environ.get("OPENAI_INVOICE_MODEL", "gpt-4.1-mini")
@@ -56,6 +56,10 @@ ALLOWED_STORAGE_KEYS = {
     "haendlerListe",
     "invoices",
     "notifyEmails",
+    "timeEntries",
+    "timeEmployees",
+    "cockpitItems",
+    "cockpitStates",
 }
 
 DEFAULT_STORAGE_VALUES = {
@@ -66,6 +70,15 @@ DEFAULT_STORAGE_VALUES = {
     "haendlerListe": [],
     "invoices": [],
     "notifyEmails": [],
+    "timeEntries": [],
+    "timeEmployees": [],
+    "cockpitItems": {
+        "tasks": [],
+        "orders": [],
+        "infos": [],
+        "productionJobs": [],
+    },
+    "cockpitStates": {},
 }
 
 PRIVATE_STORAGE_VALUES = {

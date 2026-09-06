@@ -41,6 +41,12 @@ serverfähige Projektstruktur überführt. Die Bestellfunktionen bleiben gleich:
   angekommen/nicht-geliefert Status je Produkt
 - Nicht gelieferte Freitagsprodukte werden automatisch in die aktuelle
   Freitagsbestellung übernommen und bleiben im Shop als bestellt markiert
+- Cockpit und Zeiterfassung sind in `Backend Produktion` und im
+  Geschäftsführungs-/Laden-Backend als Reiter integriert
+- Cockpit-Aufgaben können täglich, einmalig oder wiederkehrend nach
+  Wochentagen geplant werden
+- Zeiterfassung mit Personenstammdaten, Stundenlohn, Monatsstunden,
+  Monatsübersicht und CSV-Export
 
 Der wichtigste technische Unterschied:
 
@@ -144,6 +150,24 @@ Bemerkungen aus dem Textfeld einer Bestellung erscheinen automatisch direkt
 unter dem Button `Sammlung als PDF` und werden auch in die A4-PDF übernommen.
 Das gilt auch, wenn die Bestellung keine direkten Produktionsartikel enthält
 und nur aus einer Bemerkung besteht.
+
+## Cockpit und Zeiterfassung
+
+Die Funktionen liegen nicht als eigene Startseiten-Kacheln vor, sondern in den
+Backend-Bereichen:
+
+- `Backend Produktion` -> Reiter `Cockpit`
+- `Backend Produktion` -> Reiter `Zeiterfassung`
+- `Backend Geschäftsführung` -> Reiter `Cockpit`
+- `Backend Geschäftsführung` -> Reiter `Zeiterfassung`
+
+Im Cockpit können Tagesaufgaben, Bestellhinweise, Produktionsaufgaben und
+Infofelder verwaltet werden. Tages- und Produktionsaufgaben können als täglich,
+wöchentlich mit Wochentagen oder einmalig mit Datum angelegt werden.
+
+In der Zeiterfassung werden Personen im Backend als Stammdaten angelegt. Dazu
+gehören Name, Bereich/Rolle, Stundenlohn, reguläre Monatsstunden und der
+Aktiv-Status. Nur aktive Personen erscheinen in der Zeiterfassungs-Auswahl.
 
 ## Eingangskontrolle Laden
 

@@ -1,4 +1,4 @@
-const CACHE_NAME = 'gebrueder-pesch-bestellung-v15-receipt-hide-marked';
+const CACHE_NAME = 'gebrueder-pesch-bestellung-v17-backend-time-cockpit';
 const STATIC_ASSETS = [
   '/',
   '/static/index.html',
